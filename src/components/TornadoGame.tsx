@@ -56,6 +56,12 @@ export default function TornadoGame({ width, height }: Props) {
 
   const hudAccum = useSharedValue(0);
 
+  // --- "on top" thrash: when a finger is held directly over the funnel core, the
+  // tornado sways left/right rapidly and rips up out of its ground circle ---
+  const touchDown = useSharedValue(0); // 1 while a drag is active
+  const agitation = useSharedValue(0); // eased 0..1 "how much it's thrashing"
+  const ripPhase = useSharedValue(0);  // fast oscillator driving the sway
+
   const pushHud = useCallback(
     (ef: number, wind: number, timeLeft: number, debris: number, running: number) => {
       setHud({ ef, wind: Math.round(wind), timeLeft, debris, running: running === 1 });
@@ -70,6 +76,16 @@ export default function TornadoGame({ width, height }: Props) {
     stepWorld(world, dt);
     world.tick.value += 1;
     world.spin.value += dt * (5.5 + world.vmax.value * 0.09);
+
+    // Agitate when the drag target sits right on top of the funnel core. The
+    // tornado steers toward the target, so a held finger on the funnel means the
+    // target ~= the tornado position: it can't run away, so it thrashes instead.
+    const adx = world.targetX.value - world.tornadoX.value;
+    const ady = world.targetY.value - world.tornadoY.value;
+    const onTop = adx * adx + ady * ady < TUNING.RMAX * TUNING.RMAX;
+    const want = touchDown.value === 1 && onTop ? 1 : 0;
+    agitation.value += (want - agitation.value) * Math.min(1, dt * 7);
+    ripPhase.value = (ripPhase.value + dt * 40) % 6.28318; // ~6 Hz sway
 
     hudAccum.value += dt;
     if (hudAccum.value >= 0.14) {
@@ -95,6 +111,7 @@ export default function TornadoGame({ width, height }: Props) {
       Gesture.Pan()
         .onBegin((e) => {
           'worklet';
+          touchDown.value = 1;
           const p = 1 - K + K * (e.y / H);
           const camX = Math.max(0, Math.min(camMax, world.tornadoX.value - width / 2));
           world.targetX.value = camX + cxScreen + (e.x - cxScreen) / p;
@@ -106,8 +123,12 @@ export default function TornadoGame({ width, height }: Props) {
           const camX = Math.max(0, Math.min(camMax, world.tornadoX.value - width / 2));
           world.targetX.value = camX + cxScreen + (e.x - cxScreen) / p;
           world.targetY.value = e.y;
+        })
+        .onFinalize(() => {
+          'worklet';
+          touchDown.value = 0;
         }),
-    [world, H, K, cxScreen, camMax, width],
+    [world, H, K, cxScreen, camMax, width, touchDown],
   );
 
   // ================= projection =================
@@ -120,34 +141,82 @@ export default function TornadoGame({ width, height }: Props) {
     return [cxScreen + (gx - camX - cxScreen) * p, p] as const;
   };
 
-  // ---- debris ----
-  const debrisPath = useDerivedValue(() => {
+  // Horizontal sway + vertical lift applied to the funnel/face while agitated.
+  // swayX oscillates fast (ripPhase); lift raises the base up off the ground
+  // circle so the funnel visibly "rips" out of its shadow. Returns depth-scaled
+  // pixels so near/far look consistent.
+  const agitOffset = (pb: number) => {
+    'worklet';
+    const a = agitation.value;
+    const swayX = Math.sin(ripPhase.value) * 30 * a * pb;
+    const lift = a * 48 * pb;
+    return [swayX, lift, a] as const;
+  };
+
+  // ---- debris & uprooted trees (coil UP the funnel, using the SAME helix the
+  // funnel strands are drawn with, so they read as part of the wind) ----
+  const debrisChunks = useDerivedValue(() => {
     world.tick.value;
     const path = Skia.Path.Make();
-    const dx = world.dx.value, dy = world.dy.value, ds = world.dsize.value;
-    const dz = world.dz.value, alive = world.dalive.value;
+    const [bx, pb] = project(world.tornadoX.value, world.tornadoY.value);
+    const ty = world.tornadoY.value;
+    const [swayX, lift] = agitOffset(pb);
+    const baseY = ty - lift;
+    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const s = world.spin.value;
+    const alive = world.dalive.value, kind = world.dkind.value;
+    const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
+    const dsz = world.dsize.value;
     for (let i = 0; i < alive.length; i++) {
-      if (alive[i] === 0) continue;
-      const [sx, p] = project(dx[i], dy[i]);
-      path.addCircle(sx, dy[i] - dz[i] * p, ds[i] * p);
+      if (alive[i] === 0 || kind[i] !== 0) continue;
+      const h = dh[i] < 0 ? 0 : dh[i] > 1 ? 1 : dh[i];
+      const funnelR =
+        (TUNING.FUNNEL_BASE_R + (TUNING.FUNNEL_TOP_R - TUNING.FUNNEL_BASE_R) * h) * pb * vscale;
+      const rr = funnelR * rf[i];
+      const ry = rr * TUNING.RING_FLATTEN;
+      const rot = ph[i] + h * TUNING.FUNNEL_TWIST + s * TUNING.DEBRIS_COIL_SPEED;
+      const cx = bx + swayX * (0.5 + h) + Math.cos(rot) * rr;
+      const cy = baseY - h * TUNING.FUNNEL_HEIGHT * pb * vscale + Math.sin(rot) * ry;
+      path.addCircle(cx, cy, dsz[i] * pb * (0.6 + 0.4 * (1 - h)));
     }
     return path;
   });
 
-  const debrisStreaks = useDerivedValue(() => {
+  const uprootedTrees = useDerivedValue(() => {
     world.tick.value;
     const path = Skia.Path.Make();
-    const dx = world.dx.value, dy = world.dy.value;
-    const dvx = world.dvx.value, dvy = world.dvy.value;
-    const dz = world.dz.value, alive = world.dalive.value;
-    const lag = 0.05;
+    const [bx, pb] = project(world.tornadoX.value, world.tornadoY.value);
+    const ty = world.tornadoY.value;
+    const [swayX, lift] = agitOffset(pb);
+    const baseY = ty - lift;
+    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const s = world.spin.value;
+    const alive = world.dalive.value, kind = world.dkind.value;
+    const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
+    const spin = world.dspin.value, dsz = world.dsize.value;
     for (let i = 0; i < alive.length; i++) {
-      if (alive[i] === 0) continue;
-      const gx0 = dx[i] - dvx[i] * lag, gy0 = dy[i] - dvy[i] * lag;
-      const [sx0, p0] = project(gx0, gy0);
-      const [sx1, p1] = project(dx[i], dy[i]);
-      path.moveTo(sx0, gy0 - dz[i] * p0);
-      path.lineTo(sx1, dy[i] - dz[i] * p1);
+      if (alive[i] === 0 || kind[i] !== 1) continue;
+      const h = dh[i] < 0 ? 0 : dh[i];
+      const funnelR =
+        (TUNING.FUNNEL_BASE_R + (TUNING.FUNNEL_TOP_R - TUNING.FUNNEL_BASE_R) * h) * pb * vscale;
+      const rr = funnelR * rf[i];
+      const ry = rr * TUNING.RING_FLATTEN;
+      const rot = ph[i] + h * TUNING.FUNNEL_TWIST + s * TUNING.DEBRIS_COIL_SPEED;
+      const cx = bx + swayX * (0.5 + h) + Math.cos(rot) * rr;
+      const cy = baseY - h * TUNING.FUNNEL_HEIGHT * pb * vscale + Math.sin(rot) * ry;
+      // tumbling whole tree: a trunk quad + canopy blob, rotated by its self-spin
+      const sc = dsz[i] * pb;
+      const ca = Math.cos(spin[i]), sa = Math.sin(spin[i]); // tree's "up" axis
+      const px = -sa, py = ca; // perpendicular (trunk width)
+      const len = 1.1 * sc, half = 0.28 * sc;
+      const bxr = cx - ca * len * 0.5, byr = cy - sa * len * 0.5; // trunk root
+      const bxt = cx + ca * len * 0.5, byt = cy + sa * len * 0.5; // trunk top
+      path.moveTo(bxr + px * half, byr + py * half);
+      path.lineTo(bxr - px * half, byr - py * half);
+      path.lineTo(bxt - px * half, byt - py * half);
+      path.lineTo(bxt + px * half, byt + py * half);
+      path.close();
+      path.addCircle(cx + ca * (len * 0.75), cy + sa * (len * 0.75), 0.78 * sc);
     }
     return path;
   });
@@ -189,8 +258,14 @@ export default function TornadoGame({ width, height }: Props) {
           // canopy leans a little further than the trunk top
           path.addCircle(bx + lx, by - (trunk + R * 0.7) + ly, R);
         } else if (typeIndex === 1) {
-          const w = 58 * sc, h = 30 * sc;
-          path.addRRect(Skia.RRectXY(Skia.XYWHRect(bx - w / 2, by - h, w, h), 8 * sc, 8 * sc));
+          // mobile home: a low box with a shallow roof cap. Uses addRect, NOT the
+          // deprecated addRRect (which warns / no-ops in react-native-skia 2.x).
+          const w = 58 * sc, h = 26 * sc;
+          path.addRect(Skia.XYWHRect(bx - w / 2, by - h, w, h));
+          path.moveTo(bx - w / 2 - 2 * sc, by - h);
+          path.lineTo(bx, by - h - 10 * sc);
+          path.lineTo(bx + w / 2 + 2 * sc, by - h);
+          path.close();
         } else if (typeIndex === 2) {
           const w = 52 * sc, bh = 34 * sc, rh = 24 * sc;
           path.addRect(Skia.XYWHRect(bx - w / 2, by - bh, w, bh));
@@ -238,6 +313,8 @@ export default function TornadoGame({ width, height }: Props) {
     const s = world.spin.value;
     const [bx, pb] = project(world.tornadoX.value, world.tornadoY.value);
     const ty = world.tornadoY.value;
+    const [swayX, lift] = agitOffset(pb);
+    const baseY = ty - lift; // the funnel base lifts up off the ground circle
     const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
     const samples = 30;
     const path = Skia.Path.Make();
@@ -245,12 +322,13 @@ export default function TornadoGame({ width, height }: Props) {
       const phase = phaseOffset + (st / strandCount) * 6.28318;
       for (let j = 0; j < samples; j++) {
         const h = j / (samples - 1);
-        const ringY = ty - h * TUNING.FUNNEL_HEIGHT * pb * vscale;
+        const ringY = baseY - h * TUNING.FUNNEL_HEIGHT * pb * vscale;
         const rr =
           (TUNING.FUNNEL_BASE_R + (TUNING.FUNNEL_TOP_R - TUNING.FUNNEL_BASE_R) * h) * pb * vscale;
         const ry = rr * TUNING.RING_FLATTEN;
         const rot = phase + h * TUNING.FUNNEL_TWIST + s * speed;
-        const x = bx + Math.cos(rot) * rr;
+        // the top of the funnel whips further than the base -> reads as a thrash
+        const x = bx + swayX * (0.5 + h) + Math.cos(rot) * rr;
         const y = ringY + Math.sin(rot) * ry;
         if (j === 0) path.moveTo(x, y);
         else path.lineTo(x, y);
@@ -266,13 +344,16 @@ export default function TornadoGame({ width, height }: Props) {
     const s = world.spin.value;
     const [bx, pb] = project(world.tornadoX.value, world.tornadoY.value);
     const ty = world.tornadoY.value;
+    const [swayX, lift] = agitOffset(pb);
+    const cx = bx + swayX * 0.4;
+    const cy = ty - lift * 0.5; // base swirl lifts partway with the funnel
     const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
     const path = Skia.Path.Make();
     for (let k = 0; k < 3; k++) {
       const rad = TUNING.RMAX * (1.35 + 0.5 * k) * pb * vscale;
       const ry = rad * TUNING.RING_FLATTEN;
       const startDeg = (s * 55 * (1 + 0.12 * k) + k * 80) % 360;
-      path.addArc(Skia.XYWHRect(bx - rad, ty - ry, rad * 2, ry * 2), startDeg, 150);
+      path.addArc(Skia.XYWHRect(cx - rad, cy - ry, rad * 2, ry * 2), startDeg, 150);
     }
     return path;
   });
@@ -294,12 +375,13 @@ export default function TornadoGame({ width, height }: Props) {
     'worklet';
     const tx = world.tornadoX.value, ty = world.tornadoY.value;
     const [bx, pb] = project(tx, ty);
+    const [swayX, lift] = agitOffset(pb);
     const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
     const bob = Math.sin(world.spin.value * 0.6) * 3 * pb;
-    const faceY = ty - TUNING.FUNNEL_HEIGHT * 0.6 * pb * vscale + bob;
+    const faceY = ty - lift - TUNING.FUNNEL_HEIGHT * 0.6 * pb * vscale + bob;
     const eyeDX = 19 * pb * vscale;
     const look = Math.max(-1, Math.min(1, (world.targetX.value - tx) / 60));
-    return { bx, faceY, eyeDX, pb, vscale, look };
+    return { bx: bx + swayX * 1.1, faceY, eyeDX, pb, vscale, look };
   };
 
   const faceWhites = useDerivedValue(() => {
@@ -354,7 +436,6 @@ export default function TornadoGame({ width, height }: Props) {
     setHud({ ef: -1, wind: TUNING.VMAX_START, timeLeft: TUNING.RUN_SECONDS, debris: 0, running: true });
   }, [world]);
 
-  const timePct = Math.max(0, Math.min(1, hud.timeLeft / TUNING.RUN_SECONDS));
   const efText = hud.ef < 0 ? '—' : EF_LABELS[hud.ef];
 
   return (
@@ -389,8 +470,8 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={facePupils} color="#232f38" />
           <Path path={faceMouth} color="#232f38" style="stroke" strokeWidth={3.4} strokeCap="round" />
 
-          <Path path={debrisStreaks} color="#8a765a" style="stroke" strokeWidth={1.6} strokeCap="round" opacity={0.5} />
-          <Path path={debrisPath} color="#6f5c42" style="fill" />
+          <Path path={uprootedTrees} color="#5cc25f" />
+          <Path path={debrisChunks} color="#6f5c42" />
         </Canvas>
       </GestureDetector>
 
@@ -403,10 +484,6 @@ export default function TornadoGame({ width, height }: Props) {
           <Text style={styles.stat}>{hud.wind} mph peak</Text>
           <Text style={styles.statDim}>{hud.debris} debris aloft</Text>
         </View>
-      </View>
-
-      <View style={styles.timerTrack} pointerEvents="none">
-        <View style={[styles.timerFill, { width: `${timePct * 100}%` }]} />
       </View>
 
       {!hud.running && (
@@ -436,11 +513,6 @@ const styles = StyleSheet.create({
   stats: { alignItems: 'flex-end' },
   stat: { color: '#2b3d47', fontSize: 16, fontWeight: '700' },
   statDim: { color: '#63737b', fontSize: 13, marginTop: 2 },
-  timerTrack: {
-    position: 'absolute', bottom: 34, left: 20, right: 20, height: 7,
-    borderRadius: 4, backgroundColor: '#e7d3a6', overflow: 'hidden',
-  },
-  timerFill: { height: 7, backgroundColor: '#ef7d4e' },
   overlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(248,235,201,0.86)', alignItems: 'center', justifyContent: 'center',

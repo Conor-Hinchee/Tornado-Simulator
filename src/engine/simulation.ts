@@ -2,37 +2,20 @@
  * The physics step. Runs entirely on the UI thread inside a Reanimated
  * frame callback (see TornadoGame.tsx), so every function here is a worklet.
  *
- * Model summary (ported from the browser prototype):
- *   - Rankine combined vortex: tangential wind rises linearly to Vmax at the core
- *     edge (RMAX), then decays as 1/r outside it.
- *   - Radial flow = a baseline inward pull plus an outward gust that peaks just
- *     outside the core (the updraft). Net effect: debris spirals inward far out,
- *     gets flung outward near the core edge, and recirculates — which is what
- *     reads as "spiraling up and out" rather than collapsing to the center.
- *   - Debris coupling is mass-dependent, so light chunks snap into the flow and
- *     heavy chunks lumber.
- *   - Structures take damage only when local wind exceeds their breakWind. On
- *     destruction they shatter into debris and certify their EF. Eating debris
- *     at the core raises Vmax, which is the only way to reach the next threshold.
+ * Model summary:
+ *   - Damage: a structure takes damage only when the local wind exceeds its
+ *     breakWind. Wind here is a flat-top core (full Vmax inside RMAX, 1/r outside)
+ *     so the funnel shreds whatever it sits on.
+ *   - Uproot lifecycle: at 0 hp a structure does NOT instantly shatter. It is
+ *     handed to the vortex as ONE whole spinning entity that spirals in and rises
+ *     for UPROOT_TIME seconds, THEN bursts into debris chunks.
+ *   - Everything the tornado picks up lives in funnel-relative coords (angle,
+ *     radius-factor, height 0..1) and coils UP the funnel, so it reads as part of
+ *     the wind rather than orbiting on the ground. A chunk that reaches the top is
+ *     consumed and feeds Vmax, which is what powers the ramp.
  */
 import { TUNING } from './model';
 import type { WorldState } from './state';
-
-/** Rankine combined vortex tangential wind (mph) at radius r (px). */
-export function tangentialWind(r: number, rmax: number, vmax: number): number {
-  'worklet';
-  if (r < 1) return 0;
-  return r <= rmax ? vmax * (r / rmax) : vmax * (rmax / r);
-}
-
-/** Updraft strength [0..1], a gaussian peaking just outside the core. */
-export function updraft(r: number, rmax: number): number {
-  'worklet';
-  const peak = TUNING.UPDRAFT_PEAK * rmax;
-  const s = TUNING.UPDRAFT_WIDTH * rmax;
-  const d = r - peak;
-  return Math.exp(-(d * d) / (2 * s * s));
-}
 
 /**
  * Advance the world by dt seconds. Mutates the shared typed arrays in place.
@@ -46,8 +29,6 @@ export function stepWorld(w: WorldState, dt: number): void {
   if (dt > 0.05) dt = 0.05;
 
   const rmax = TUNING.RMAX;
-  const eatR = TUNING.EAT_RADIUS_FRAC * rmax;
-  const eatR2 = eatR * eatR;
 
   // --- steer the tornado toward the drag target ---
   const ease = 1 - Math.exp(-TUNING.STEER_EASE * dt);
@@ -59,120 +40,120 @@ export function stepWorld(w: WorldState, dt: number): void {
   w.tornadoY.value = ty;
 
   const vmax = w.vmax.value;
+  const vscale = 1 + 0.5 * (vmax / TUNING.VMAX_CAP);
 
-  // --- structures: damage + destruction ---
+  // debris & uprooted structures (funnel-relative particles; see state.ts)
+  const dalive = w.dalive.value, dkind = w.dkind.value, dphase = w.dphase.value;
+  const drf = w.drf.value, dtargrf = w.dtargrf.value, dh = w.dh.value;
+  const drise = w.drise.value, dspin = w.dspin.value, dspinv = w.dspinv.value;
+  const dsize = w.dsize.value, dmass = w.dmass.value, dtimer = w.dtimer.value;
+  const N = dalive.length;
+
+  // --- structures: damage, then UPROOT (they lift out whole and spin) ---
   const sx = w.sx.value, sy = w.sy.value, shp = w.shp.value;
   const sbreak = w.sbreak.value, sef = w.sef.value, salive = w.salive.value;
-  const stype = w.stype.value, schunks = w.schunks.value, schunkMass = w.schunkMass.value;
-
-  const dx = w.dx.value, dy = w.dy.value, dvx = w.dvx.value, dvy = w.dvy.value;
-  const dmass = w.dmass.value, dsize = w.dsize.value, dz = w.dz.value, dalive = w.dalive.value;
-  const N = dalive.length;
+  const schunks = w.schunks.value, schunkMass = w.schunkMass.value;
 
   for (let i = 0; i < salive.length; i++) {
     if (salive[i] === 0) continue;
     const rx = sx[i] - tx;
     const ry = sy[i] - ty;
     const r = Math.sqrt(rx * rx + ry * ry);
-    const wind = tangentialWind(r, rmax, vmax);
-    if (wind <= sbreak[i]) continue; // threshold gate: below it, nothing happens
+    // Damage intensity uses a flat-top core (full Vmax inside RMAX, 1/r falloff
+    // outside) so sitting the funnel on a structure actually shreds it — the raw
+    // Rankine field has a dead centre. See stack_and_build memory for the why.
+    const dwind = r <= rmax ? vmax : (vmax * rmax) / r;
+    if (dwind <= sbreak[i]) continue; // threshold gate: below it, nothing happens
 
-    shp[i] -= (wind - sbreak[i]) * TUNING.DAMAGE_K * dt;
+    shp[i] -= (dwind - sbreak[i]) * TUNING.DAMAGE_K * dt;
     if (shp[i] > 0) continue;
 
-    // destroyed -> certify EF and shatter into debris
+    // destroyed -> UPROOT: certify EF now, and hand the whole structure to the
+    // vortex as ONE spinning entity. It spirals in, rises a little, and only
+    // later bursts into chunks (handled in the debris loop below).
     salive[i] = 0;
     if (sef[i] > w.maxEF.value) w.maxEF.value = sef[i];
 
-    const chunks = schunks[i];
-    const cmass = schunkMass[i];
-    for (let c = 0; c < chunks; c++) {
-      // find a free debris slot
-      let slot = -1;
-      for (let k = 0; k < N; k++) {
-        if (dalive[k] === 0) { slot = k; break; }
-      }
-      if (slot < 0) break; // pool full
-      // pseudo-random scatter around the structure using cheap trig hashing
-      const a = (i * 7.13 + c * 2.399) % 6.283;
-      const spread = 6 + ((c * 13 + i * 5) % 18);
-      dx[slot] = sx[i] + Math.cos(a) * spread;
-      dy[slot] = sy[i] + Math.sin(a) * spread;
-      dvx[slot] = Math.cos(a) * 30;
-      dvy[slot] = Math.sin(a) * 30;
-      const m = cmass * (0.75 + ((c * 17 + i * 11) % 50) / 100);
-      dmass[slot] = m;
-      dsize[slot] = 2 + m * 3.2;
-      dz[slot] = 0;
+    let slot = -1;
+    for (let k = 0; k < N; k++) { if (dalive[k] === 0) { slot = k; break; } }
+    if (slot >= 0) {
+      let rf = r / (TUNING.FUNNEL_BASE_R * vscale);
+      if (rf < 1) rf = 1; else if (rf > 5) rf = 5;
+      dkind[slot] = 1; // whole tree
+      dphase[slot] = Math.atan2(ry, rx); // its real bearing from the core
+      drf[slot] = rf; // start at its real distance...
+      dtargrf[slot] = 1.0; // ...and spiral onto the funnel surface
+      dh[slot] = 0;
+      drise[slot] = schunks[i]; // reused on a whole tree: chunk count for the burst
+      dspin[slot] = 0;
+      dspinv[slot] = TUNING.TREE_TUMBLE;
+      dsize[slot] = TUNING.TREE_SIZE;
+      dmass[slot] = schunkMass[i]; // reused on a whole tree: base chunk mass
+      dtimer[slot] = TUNING.UPROOT_TIME;
       dalive[slot] = 1;
-      w.debrisCount.value += 1;
     }
   }
 
-  // --- debris: advect in the vortex, eat at the core ---
-  const PX = TUNING.PX_PER_MPH;
-  const damp = TUNING.DAMP;
+  // --- debris & uprooted trees: coil UP the funnel ---
   let vmaxNew = vmax;
   let count = 0;
 
   for (let i = 0; i < N; i++) {
     if (dalive[i] === 0) continue;
 
-    const rx = dx[i] - tx;
-    const ry = dy[i] - ty;
-    const r2 = rx * rx + ry * ry;
+    // orbit the axis (a touch slower higher up) and tumble in place
+    const spinRate = (TUNING.DEBRIS_SPIN_BASE + vmax * TUNING.DEBRIS_SPIN_VK) * (1 - 0.35 * dh[i]);
+    dphase[i] += spinRate * dt;
+    dspin[i] += dspinv[i] * dt;
 
-    // eat at the core -> grow strength
-    if (r2 < eatR2) {
-      dalive[i] = 0;
-      vmaxNew += TUNING.EAT_GAIN * dmass[i];
-      continue;
+    if (dkind[i] === 1) {
+      // whole tree: spiral inward onto the funnel + rise a little, then burst
+      drf[i] += (dtargrf[i] - drf[i]) * Math.min(1, TUNING.UPROOT_INWARD * dt);
+      dh[i] += (TUNING.TREE_RISE_H - dh[i]) * Math.min(1, TUNING.UPROOT_RISE * dt);
+      dtimer[i] -= dt;
+      if (dtimer[i] <= 0) {
+        dalive[i] = 0;
+        const nCh = drise[i] < 1 ? 5 : Math.round(drise[i]);
+        const cmass = dmass[i] > 0 ? dmass[i] : 0.45;
+        for (let c = 0; c < nCh; c++) {
+          let slot = -1;
+          for (let k = 0; k < N; k++) { if (dalive[k] === 0) { slot = k; break; } }
+          if (slot < 0) break;
+          const hsh = i * 13 + c * 7;
+          const j1 = (hsh % 100) / 100;
+          const j2 = ((hsh * 3) % 100) / 100;
+          dkind[slot] = 0;
+          dphase[slot] = dphase[i] + (c / nCh) * 6.28318;
+          drf[slot] = 0.75 + j1 * 0.6;
+          dtargrf[slot] = 0.6 + j2 * 0.7; // 0.6..1.3 x funnel radius
+          dh[slot] = dh[i] + j1 * 0.05;
+          drise[slot] = TUNING.CHUNK_RISE_MIN + j2 * (TUNING.CHUNK_RISE_MAX - TUNING.CHUNK_RISE_MIN);
+          dspin[slot] = j1 * 6.28318;
+          dspinv[slot] = TUNING.CHUNK_TUMBLE * (0.6 + j2);
+          dsize[slot] = 3 + j2 * 3;
+          dmass[slot] = cmass * (0.75 + j1 * 0.5);
+          dtimer[slot] = 0;
+          dalive[slot] = 1;
+        }
+        continue;
+      }
+    } else {
+      // chunk: climb the funnel, easing onto its funnel-hugging radius
+      dh[i] += drise[i] * dt;
+      drf[i] += (dtargrf[i] - drf[i]) * Math.min(1, TUNING.CHUNK_SETTLE * dt);
+      if (dh[i] >= 1) {
+        // reached the top -> consumed by the storm -> grows Vmax (the ramp)
+        dalive[i] = 0;
+        vmaxNew += TUNING.EAT_GAIN * dmass[i];
+        continue;
+      }
     }
     count++;
-
-    const r = Math.sqrt(r2);
-    const inv = 1 / r;
-    const nrx = rx * inv; // radial unit (outward)
-    const nry = ry * inv;
-    const trx = -nry; // tangential unit (counter-clockwise)
-    const try_ = nrx;
-
-    // updraft governs both the outward gust and how high the chunk lofts
-    const up = updraft(r, rmax);
-
-    // ease debris height toward the local updraft strength (render z-axis)
-    const targetZ = up * TUNING.LOFT_MAX;
-    dz[i] += (targetZ - dz[i]) * Math.min(TUNING.LOFT_EASE * dt, 1);
-
-    // wind velocity field at this point (px/s)
-    const tanSpeed = tangentialWind(r, rmax, vmax) * PX;
-    const radial = up * TUNING.OUTFLOW - TUNING.INFLOW;
-    const wvx = trx * tanSpeed + nrx * radial;
-    const wvy = try_ * tanSpeed + nry * radial;
-
-    // mass-dependent coupling: light debris snaps to the flow
-    const k = (TUNING.COUPLING / dmass[i]) * dt;
-    let vx = dvx[i] + (wvx - dvx[i]) * Math.min(k, 1);
-    let vy = dvy[i] + (wvy - dvy[i]) * Math.min(k, 1);
-    vx *= damp;
-    vy *= damp;
-
-    dvx[i] = vx;
-    dvy[i] = vy;
-    dx[i] += vx * dt;
-    dy[i] += vy * dt;
   }
 
   if (vmaxNew > TUNING.VMAX_CAP) vmaxNew = TUNING.VMAX_CAP;
   w.vmax.value = vmaxNew;
   w.debrisCount.value = count;
 
-  // --- run clock ---
-  const t = w.timeLeft.value - dt;
-  if (t <= 0) {
-    w.timeLeft.value = 0;
-    w.running.value = 0; // rope out
-  } else {
-    w.timeLeft.value = t;
-  }
+  // No run clock: the sim runs indefinitely (timer removed).
 }

@@ -38,7 +38,7 @@ export interface StructureType {
 
 export const STRUCTURES: Record<string, StructureType> = {
   tree: {
-    key: 'tree', label: 'Tree', breakWind: 65, ef: 0, hp: 45,
+    key: 'tree', label: 'Tree', breakWind: 65, ef: 0, hp: 30,
     w: 26, h: 46, chunks: 5, chunkMass: 0.45, color: '#5cc25f',
   },
   trailer: {
@@ -69,7 +69,7 @@ export const TUNING = {
   RMAX: 58, // core radius (px): solid-body rotation inside, decay outside
   VMAX_START: 70, // starting peak wind (mph): trees (65) yes, trailers (86) no
   VMAX_CAP: 210, // ceiling on peak wind
-  EAT_GAIN: 26, // Vmax gained per unit mass eaten
+  EAT_GAIN: 14, // Vmax gained per unit mass eaten (tuned so it takes several trees' worth of eaten debris to ramp Vmax 70 -> past the 86 mph EF1 gate, not one chunk)
 
   // --- flow field ---
   PX_PER_MPH: 2.2, // maps mph -> px/s of tangential debris velocity
@@ -84,7 +84,7 @@ export const TUNING = {
   EAT_RADIUS_FRAC: 0.4, // eat debris inside this fraction of RMAX
 
   // --- damage ---
-  DAMAGE_K: 0.9, // hp lost per (mph over threshold) per second
+  DAMAGE_K: 1.4, // hp lost per (mph over threshold) per second
 
   // --- steering ---
   STEER_EASE: 2.5, // how quickly the tornado chases the drag target (lower = slower/weightier)
@@ -107,6 +107,26 @@ export const TUNING = {
   // --- debris loft (the z axis, render + light integration only) ---
   LOFT_MAX: 70, // max height (px) debris rises in the updraft
   LOFT_EASE: 2.6, // how fast debris eases toward its target height
+
+  // --- debris + uproot lifecycle (funnel-coiling model) ---
+  // Everything the tornado picks up is expressed in funnel-relative coords and
+  // coils UP the funnel, so it reads as part of the wind rather than orbiting on
+  // the ground. A destroyed tree first lifts out WHOLE and spins for UPROOT_TIME
+  // seconds, then bursts into chunks that keep climbing until they reach the top
+  // (where they're consumed and feed Vmax).
+  DEBRIS_SPIN_BASE: 2.6, // rad/s base angular speed around the funnel axis
+  DEBRIS_SPIN_VK: 0.055, // extra rad/s per mph of Vmax (a stronger storm whips faster)
+  DEBRIS_COIL_SPEED: 2.1, // couples debris coil to the funnel strands' own rotation
+  UPROOT_TIME: 1.25, // seconds a tree spins around whole before it shatters
+  UPROOT_INWARD: 2.6, // how fast an uprooted tree spirals in onto the funnel
+  UPROOT_RISE: 1.9, // how fast an uprooted tree climbs while still whole
+  TREE_RISE_H: 0.22, // height (0..1) an uprooted tree reaches before bursting
+  TREE_TUMBLE: 7.0, // self-rotation speed (rad/s) of a tumbling whole tree
+  TREE_SIZE: 22, // render size (px) of a whole uprooted tree
+  CHUNK_RISE_MIN: 0.16, // chunk ascent rate (h per second) range after a burst
+  CHUNK_RISE_MAX: 0.42,
+  CHUNK_SETTLE: 3.2, // how fast a chunk eases onto its funnel-hugging radius
+  CHUNK_TUMBLE: 9.0, // chunk self-rotation speed (rad/s)
 
   // --- capacity ---
   MAX_DEBRIS: 360,
