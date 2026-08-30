@@ -58,6 +58,11 @@ export interface WorldState {
   debrisCount: SharedValue<number>;
   tick: SharedValue<number>; // increments each frame; Skia derived values read it to recompute
   spin: SharedValue<number>; // accumulated funnel rotation (radians); advances with wind speed
+  strain: SharedValue<number>; // 0..1 effort face while tugging a stubborn tree
+  pop: SharedValue<number>; // 0..1 "big O" celebration pulse right after an uproot
+  introShake: SharedValue<number>; // seconds left on the one-time first-tree face shake
+  introUsed: SharedValue<number>; // 1 once the intro shake has been triggered this run
+  popVariant: SharedValue<number>; // celebration mouth: 0 = grin, 1 = open mouth (chosen per pop)
 
   // bounds
   width: number;
@@ -102,6 +107,11 @@ export function createWorld(width: number, height: number): WorldState {
     debrisCount: makeMutable(0),
     tick: makeMutable(0),
     spin: makeMutable(0),
+    strain: makeMutable(0),
+    pop: makeMutable(0),
+    introShake: makeMutable(0),
+    introUsed: makeMutable(0),
+    popVariant: makeMutable(0),
 
     width,
     height,
@@ -151,6 +161,11 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   w.debrisCount.value = 0;
   w.tick.value = 0;
   w.spin.value = 0;
+  w.strain.value = 0;
+  w.pop.value = 0;
+  w.introShake.value = 0;
+  w.introUsed.value = 0;
+  w.popVariant.value = 0;
 
   // Field composition: lots of trees, some trailers, fewer houses, a couple silos.
   const plan: string[] = [

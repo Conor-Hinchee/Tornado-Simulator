@@ -61,6 +61,7 @@ export default function TornadoGame({ width, height }: Props) {
   const touchDown = useSharedValue(0); // 1 while a drag is active
   const agitation = useSharedValue(0); // eased 0..1 "how much it's thrashing"
   const ripPhase = useSharedValue(0);  // fast oscillator driving the sway
+  const dragV = useSharedValue(0);     // finger drag speed (px/s); decays each frame
 
   const pushHud = useCallback(
     (ef: number, wind: number, timeLeft: number, debris: number, running: number) => {
@@ -77,13 +78,16 @@ export default function TornadoGame({ width, height }: Props) {
     world.tick.value += 1;
     world.spin.value += dt * (5.5 + world.vmax.value * 0.09);
 
-    // Agitate when the drag target sits right on top of the funnel core. The
-    // tornado steers toward the target, so a held finger on the funnel means the
-    // target ~= the tornado position: it can't run away, so it thrashes instead.
+    // Agitate ONLY when the finger is held roughly STILL on top of the funnel —
+    // not while dragging the tornado around (that was shaking the face + debris
+    // during normal movement). dragV decays each frame, so a stopped finger
+    // resumes the thrash; a moving one suppresses it.
+    dragV.value *= Math.exp(-dt * 6);
     const adx = world.targetX.value - world.tornadoX.value;
     const ady = world.targetY.value - world.tornadoY.value;
     const onTop = adx * adx + ady * ady < TUNING.RMAX * TUNING.RMAX;
-    const want = touchDown.value === 1 && onTop ? 1 : 0;
+    const still = dragV.value < 70; // px/s; above this the finger is dragging
+    const want = touchDown.value === 1 && onTop && still ? 1 : 0;
     agitation.value += (want - agitation.value) * Math.min(1, dt * 7);
     ripPhase.value = (ripPhase.value + dt * 40) % 6.28318; // ~6 Hz sway
 
@@ -112,6 +116,7 @@ export default function TornadoGame({ width, height }: Props) {
         .onBegin((e) => {
           'worklet';
           touchDown.value = 1;
+          dragV.value = 0;
           const p = 1 - K + K * (e.y / H);
           const camX = Math.max(0, Math.min(camMax, world.tornadoX.value - width / 2));
           world.targetX.value = camX + cxScreen + (e.x - cxScreen) / p;
@@ -119,6 +124,7 @@ export default function TornadoGame({ width, height }: Props) {
         })
         .onChange((e) => {
           'worklet';
+          dragV.value = Math.sqrt(e.velocityX * e.velocityX + e.velocityY * e.velocityY);
           const p = 1 - K + K * (e.y / H);
           const camX = Math.max(0, Math.min(camMax, world.tornadoX.value - width / 2));
           world.targetX.value = camX + cxScreen + (e.x - cxScreen) / p;
@@ -127,8 +133,9 @@ export default function TornadoGame({ width, height }: Props) {
         .onFinalize(() => {
           'worklet';
           touchDown.value = 0;
+          dragV.value = 0;
         }),
-    [world, H, K, cxScreen, camMax, width, touchDown],
+    [world, H, K, cxScreen, camMax, width, touchDown, dragV],
   );
 
   // ================= projection =================
@@ -162,7 +169,7 @@ export default function TornadoGame({ width, height }: Props) {
     const ty = world.tornadoY.value;
     const [swayX, lift] = agitOffset(pb);
     const baseY = ty - lift;
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
     const s = world.spin.value;
     const alive = world.dalive.value, kind = world.dkind.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -189,7 +196,7 @@ export default function TornadoGame({ width, height }: Props) {
     const ty = world.tornadoY.value;
     const [swayX, lift] = agitOffset(pb);
     const baseY = ty - lift;
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
     const s = world.spin.value;
     const alive = world.dalive.value, kind = world.dkind.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -244,7 +251,10 @@ export default function TornadoGame({ width, height }: Props) {
           const dist = Math.sqrt(rdx * rdx + rdy * rdy) || 1;
           const strength = Math.min(1, (world.vmax.value * 1.3) / dist);
           const wob = 1 + 0.12 * Math.sin(world.tick.value * 0.12 + i);
-          const lean = 24 * strength * wob * p;
+          // as the tree nears death (dmg -> 0) it gets yanked HARD toward the
+          // funnel, telegraphing the uproot so it's clear the tornado grabbed it.
+          const grab = 1 + (1 - Math.max(dmg, 0)) * 2.0;
+          const lean = 24 * strength * wob * p * grab;
           const lx = (rdx / dist) * lean;
           const ly = (rdy / dist) * lean * 0.4;
           const tw = 4 * sc;
@@ -315,7 +325,7 @@ export default function TornadoGame({ width, height }: Props) {
     const ty = world.tornadoY.value;
     const [swayX, lift] = agitOffset(pb);
     const baseY = ty - lift; // the funnel base lifts up off the ground circle
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
     const samples = 30;
     const path = Skia.Path.Make();
     for (let st = 0; st < strandCount; st++) {
@@ -347,7 +357,7 @@ export default function TornadoGame({ width, height }: Props) {
     const [swayX, lift] = agitOffset(pb);
     const cx = bx + swayX * 0.4;
     const cy = ty - lift * 0.5; // base swirl lifts partway with the funnel
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
     const path = Skia.Path.Make();
     for (let k = 0; k < 3; k++) {
       const rad = TUNING.RMAX * (1.35 + 0.5 * k) * pb * vscale;
@@ -362,7 +372,7 @@ export default function TornadoGame({ width, height }: Props) {
     world.tick.value;
     const [bx, pb] = project(world.tornadoX.value, world.tornadoY.value);
     const ty = world.tornadoY.value;
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
     const rx = TUNING.RMAX * 1.0 * pb * vscale;
     const ry = rx * TUNING.RING_FLATTEN;
     const path = Skia.Path.Make();
@@ -375,19 +385,34 @@ export default function TornadoGame({ width, height }: Props) {
     'worklet';
     const tx = world.tornadoX.value, ty = world.tornadoY.value;
     const [bx, pb] = project(tx, ty);
-    const [swayX, lift] = agitOffset(pb);
-    const vscale = 1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP);
-    const bob = Math.sin(world.spin.value * 0.6) * 3 * pb;
-    const faceY = ty - lift - TUNING.FUNNEL_HEIGHT * 0.6 * pb * vscale + bob;
+    const [, lift] = agitOffset(pb);
+    const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (world.vmax.value / TUNING.VMAX_CAP));
+    // Face sits at a FIXED spot on the funnel: no idle bob AND no horizontal sway,
+    // so it never shakes side to side. Only the smooth vertical lift is applied so
+    // it still rises with the funnel when it rips out of the ground.
+    const faceY = ty - lift - TUNING.FUNNEL_HEIGHT * 0.6 * pb * vscale;
     const eyeDX = 19 * pb * vscale;
     const look = Math.max(-1, Math.min(1, (world.targetX.value - tx) / 60));
-    return { bx: bx + swayX * 1.1, faceY, eyeDX, pb, vscale, look };
+    // a little ONE-TIME shake during the first tree pull (introShake secs left),
+    // fading out over its final ~0.6s. ripPhase already advances every frame.
+    const is = world.introShake.value;
+    const shakeX = is > 0 ? Math.sin(ripPhase.value * 1.6) * 5 * pb * Math.min(1, is / 0.6) : 0;
+    return { bx: bx + shakeX, faceY, eyeDX, pb, vscale, look };
+  };
+
+  // eye openness: 1 normal, squeezed shut while straining, wide on the pop.
+  const eyeOpen = () => {
+    'worklet';
+    return Math.max(0.12, 1 - 0.85 * world.strain.value);
   };
 
   const faceWhites = useDerivedValue(() => {
     const g = faceGeom();
     const path = Skia.Path.Make();
-    const rx = 13 * g.pb * g.vscale, ry = 15 * g.pb * g.vscale;
+    if (world.pop.value > 0.3) return path; // happy "- -" eyes take over on the pop
+    const open = eyeOpen();
+    const rx = 13 * g.pb * g.vscale;
+    const ry = 15 * g.pb * g.vscale * open; // flattens to a slit when straining
     path.addOval(Skia.XYWHRect(g.bx - g.eyeDX - rx, g.faceY - ry, rx * 2, ry * 2));
     path.addOval(Skia.XYWHRect(g.bx + g.eyeDX - rx, g.faceY - ry, rx * 2, ry * 2));
     return path;
@@ -396,19 +421,78 @@ export default function TornadoGame({ width, height }: Props) {
   const facePupils = useDerivedValue(() => {
     const g = faceGeom();
     const path = Skia.Path.Make();
-    const r = 6 * g.pb * g.vscale;
+    if (world.pop.value > 0.3) return path; // no pupils during the happy "- -" eyes
+    const open = eyeOpen();
+    if (open < 0.4) return path; // eyes squeezed shut -> no pupils
+    const r = 6 * g.pb * g.vscale * Math.min(1.15, open);
     const ox = g.look * 5 * g.pb, oy = 3 * g.pb;
     path.addCircle(g.bx - g.eyeDX + ox, g.faceY + oy, r);
     path.addCircle(g.bx + g.eyeDX + ox, g.faceY + oy, r);
     return path;
   });
 
-  const faceMouth = useDerivedValue(() => {
+  // FACE 😄/😲 happy "- -" (slant) eyes: two dashes shown during the celebration pop
+  const faceHappyEyes = useDerivedValue(() => {
     const g = faceGeom();
     const path = Skia.Path.Make();
-    const mw = 34 * g.pb * g.vscale, mh = 30 * g.pb * g.vscale;
+    if (world.pop.value <= 0.3) return path;
+    const halfW = 10 * g.pb * g.vscale;
+    path.moveTo(g.bx - g.eyeDX - halfW, g.faceY);
+    path.lineTo(g.bx - g.eyeDX + halfW, g.faceY);
+    path.moveTo(g.bx + g.eyeDX - halfW, g.faceY);
+    path.lineTo(g.bx + g.eyeDX + halfW, g.faceY);
+    return path;
+  });
+
+  const faceMouth = useDerivedValue(() => {
+    const g = faceGeom();
+    const s = world.strain.value, o = world.pop.value;
+    const path = Skia.Path.Make();
+    if (o > 0.25) {
+      // FACE 😄/😲 celebration (pairs with the "- -" slant eyes): popVariant picks
+      // 😲 open-mouth (dash eyes + O) or 😄 grin (dash eyes + big smile) per pop.
+      const my = g.faceY + 16 * g.pb * g.vscale;
+      if (world.popVariant.value > 0.5) {
+        const mw = (30 + 8 * o) * g.pb * g.vscale;
+        const mh = (26 + 12 * o) * g.pb * g.vscale;
+        path.addOval(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh));
+      } else {
+        const mw = (40 + 8 * o) * g.pb * g.vscale;
+        const mh = (32 + 10 * o) * g.pb * g.vscale;
+        path.addArc(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh), 10, 160);
+      }
+      return path;
+    }
+    if (s > 0.4) {
+      // FACE 😫 straining (slant/slit-eye effort face): an OPEN mouth that grows
+      // taller with effort — a grunt/"hnngh". (Below strain 0.4 it's 🙂 smile.)
+      const mw = (16 + 6 * s) * g.pb * g.vscale;
+      const mh = (10 + 18 * s) * g.pb * g.vscale;
+      const my = g.faceY + 18 * g.pb * g.vscale;
+      path.addOval(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh));
+      return path;
+    }
+    // FACE 🙂 relaxed/cruising: a normal smile arc
+    const mw = 34 * g.pb * g.vscale;
+    const mh = 30 * g.pb * g.vscale;
     const my = g.faceY + 20 * g.pb * g.vscale;
     path.addArc(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh), 20, 140);
+    return path;
+  });
+
+  // FACE 😫 furrowed brows: only appear while the tornado is straining
+  const faceBrows = useDerivedValue(() => {
+    const g = faceGeom();
+    const s = world.strain.value;
+    const path = Skia.Path.Make();
+    if (s < 0.15) return path;
+    const len = 15 * g.pb * g.vscale;
+    const drop = 7 * s * g.pb * g.vscale; // inner ends pull DOWN toward the nose
+    const by = g.faceY - 15 * g.pb * g.vscale;
+    path.moveTo(g.bx - g.eyeDX - len * 0.5, by - drop * 0.3);
+    path.lineTo(g.bx - g.eyeDX + len * 0.5, by + drop);
+    path.moveTo(g.bx + g.eyeDX + len * 0.5, by - drop * 0.3);
+    path.lineTo(g.bx + g.eyeDX - len * 0.5, by + drop);
     return path;
   });
 
@@ -468,7 +552,9 @@ export default function TornadoGame({ width, height }: Props) {
 
           <Path path={faceWhites} color="#ffffff" />
           <Path path={facePupils} color="#232f38" />
+          <Path path={faceHappyEyes} color="#232f38" style="stroke" strokeWidth={3.4} strokeCap="round" />
           <Path path={faceMouth} color="#232f38" style="stroke" strokeWidth={3.4} strokeCap="round" />
+          <Path path={faceBrows} color="#232f38" style="stroke" strokeWidth={3} strokeCap="round" />
 
           <Path path={uprootedTrees} color="#5cc25f" />
           <Path path={debrisChunks} color="#6f5c42" />

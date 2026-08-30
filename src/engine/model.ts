@@ -38,7 +38,7 @@ export interface StructureType {
 
 export const STRUCTURES: Record<string, StructureType> = {
   tree: {
-    key: 'tree', label: 'Tree', breakWind: 65, ef: 0, hp: 30,
+    key: 'tree', label: 'Tree', breakWind: 65, ef: 0, hp: 15,
     w: 26, h: 46, chunks: 5, chunkMass: 0.45, color: '#5cc25f',
   },
   trailer: {
@@ -114,19 +114,33 @@ export const TUNING = {
   // the ground. A destroyed tree first lifts out WHOLE and spins for UPROOT_TIME
   // seconds, then bursts into chunks that keep climbing until they reach the top
   // (where they're consumed and feed Vmax).
-  DEBRIS_SPIN_BASE: 2.6, // rad/s base angular speed around the funnel axis
-  DEBRIS_SPIN_VK: 0.055, // extra rad/s per mph of Vmax (a stronger storm whips faster)
-  DEBRIS_COIL_SPEED: 2.1, // couples debris coil to the funnel strands' own rotation
-  UPROOT_TIME: 1.25, // seconds a tree spins around whole before it shatters
-  UPROOT_INWARD: 2.6, // how fast an uprooted tree spirals in onto the funnel
-  UPROOT_RISE: 1.9, // how fast an uprooted tree climbs while still whole
+  DEBRIS_SPIN_BASE: 3.3, // rad/s base angular speed around the funnel axis
+  DEBRIS_SPIN_VK: 0.07, // extra rad/s per mph of Vmax (a stronger storm whips faster)
+  DEBRIS_COIL_SPEED: 2.5, // couples debris coil to the funnel strands' own rotation
+  UPROOT_TIME: 0.8, // seconds a tree spins around whole before it shatters
+  UPROOT_INWARD: 3.8, // how fast an uprooted tree spirals in onto the funnel
+  UPROOT_RISE: 2.9, // how fast an uprooted tree climbs while still whole
   TREE_RISE_H: 0.22, // height (0..1) an uprooted tree reaches before bursting
   TREE_TUMBLE: 7.0, // self-rotation speed (rad/s) of a tumbling whole tree
   TREE_SIZE: 22, // render size (px) of a whole uprooted tree
-  CHUNK_RISE_MIN: 0.16, // chunk ascent rate (h per second) range after a burst
-  CHUNK_RISE_MAX: 0.42,
-  CHUNK_SETTLE: 3.2, // how fast a chunk eases onto its funnel-hugging radius
-  CHUNK_TUMBLE: 9.0, // chunk self-rotation speed (rad/s)
+  CHUNK_RISE_MIN: 0.26, // chunk ascent rate (h per second) range after a burst
+  CHUNK_RISE_MAX: 0.6,
+  CHUNK_SETTLE: 4.0, // how fast a chunk eases onto its funnel-hugging radius
+  CHUNK_TUMBLE: 10.0, // chunk self-rotation speed (rad/s)
+
+  // --- effort face (only while pulling is genuinely hard, i.e. early game) ---
+  STRAIN_VMAX_MAX: 105, // above this Vmax trees pop easily -> no tugging face
+  STRAIN_RISE: 5.0, // how fast the strain face builds while holding a tree
+  STRAIN_FALL: 9.0, // how fast it relaxes once the tree lets go
+  POP_FALL: 2.6, // how fast the "big O" celebration fades after an uproot
+  POP_FREE_CHANCE: 0.22, // odds of a spontaneous "big O" per free (easy) uproot
+  INTRO_SHAKE_SECS: 2, // one-time little face shake on the very first tree pull
+  POP_OPEN_CHANCE: 0.45, // odds the happy celebration is the open-mouth variant (else a grin)
+
+  // --- overall tornado visual scale ---
+  // Multiplies the whole funnel/face/arcs/shadow size at every wind level (start
+  // AND max). Purely visual — physics (RMAX, damage reach, steering) is unchanged.
+  TORNADO_SCALE: 0.75,
 
   // --- capacity ---
   MAX_DEBRIS: 360,

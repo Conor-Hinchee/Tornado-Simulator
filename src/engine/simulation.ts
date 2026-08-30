@@ -40,7 +40,7 @@ export function stepWorld(w: WorldState, dt: number): void {
   w.tornadoY.value = ty;
 
   const vmax = w.vmax.value;
-  const vscale = 1 + 0.5 * (vmax / TUNING.VMAX_CAP);
+  const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (vmax / TUNING.VMAX_CAP));
 
   // debris & uprooted structures (funnel-relative particles; see state.ts)
   const dalive = w.dalive.value, dkind = w.dkind.value, dphase = w.dphase.value;
@@ -50,10 +50,11 @@ export function stepWorld(w: WorldState, dt: number): void {
   const N = dalive.length;
 
   // --- structures: damage, then UPROOT (they lift out whole and spin) ---
-  const sx = w.sx.value, sy = w.sy.value, shp = w.shp.value;
+  const sx = w.sx.value, sy = w.sy.value, shp = w.shp.value, shpMax = w.shpMax.value;
   const sbreak = w.sbreak.value, sef = w.sef.value, salive = w.salive.value;
   const schunks = w.schunks.value, schunkMass = w.schunkMass.value;
 
+  let strainTarget = 0; // 1 this frame if we're still wrestling a stubborn tree
   for (let i = 0; i < salive.length; i++) {
     if (salive[i] === 0) continue;
     const rx = sx[i] - tx;
@@ -66,13 +67,33 @@ export function stepWorld(w: WorldState, dt: number): void {
     if (dwind <= sbreak[i]) continue; // threshold gate: below it, nothing happens
 
     shp[i] -= (dwind - sbreak[i]) * TUNING.DAMAGE_K * dt;
-    if (shp[i] > 0) continue;
+    if (shp[i] > 0) {
+      // still wrestling this one -> show the effort face, but only once the tree
+      // is ~1/4 of the way uprooted (25% damage), and only while a pull is
+      // genuinely slow/hard (early game, low Vmax). Once Vmax is high, trees pop
+      // instantly and we skip the tugging face entirely.
+      if (vmax < TUNING.STRAIN_VMAX_MAX && shp[i] <= 0.75 * shpMax[i]) {
+        strainTarget = 1;
+        // one-time little shake on the very FIRST tree we ever wrestle this run
+        if (w.introUsed.value === 0) {
+          w.introUsed.value = 1;
+          w.introShake.value = TUNING.INTRO_SHAKE_SECS;
+        }
+      }
+      continue;
+    }
 
     // destroyed -> UPROOT: certify EF now, and hand the whole structure to the
     // vortex as ONE spinning entity. It spirals in, rises a little, and only
     // later bursts into chunks (handled in the debris loop below).
     salive[i] = 0;
     if (sef[i] > w.maxEF.value) w.maxEF.value = sef[i];
+    // "big O!" — always on a hard struggle pull, and now and then even while
+    // freely eating trees, for a little spontaneous delight
+    if (vmax < TUNING.STRAIN_VMAX_MAX || Math.random() < TUNING.POP_FREE_CHANCE) {
+      w.pop.value = 1;
+      w.popVariant.value = Math.random() < TUNING.POP_OPEN_CHANCE ? 1 : 0;
+    }
 
     let slot = -1;
     for (let k = 0; k < N; k++) { if (dalive[k] === 0) { slot = k; break; } }
@@ -154,6 +175,16 @@ export function stepWorld(w: WorldState, dt: number): void {
   if (vmaxNew > TUNING.VMAX_CAP) vmaxNew = TUNING.VMAX_CAP;
   w.vmax.value = vmaxNew;
   w.debrisCount.value = count;
+
+  // effort face: build strain while tugging, release fast; fade the pop pulse
+  const strainEase = strainTarget > w.strain.value ? TUNING.STRAIN_RISE : TUNING.STRAIN_FALL;
+  w.strain.value += (strainTarget - w.strain.value) * Math.min(1, strainEase * dt);
+  w.pop.value -= dt * TUNING.POP_FALL;
+  if (w.pop.value < 0) w.pop.value = 0;
+  if (w.introShake.value > 0) {
+    w.introShake.value -= dt;
+    if (w.introShake.value < 0) w.introShake.value = 0;
+  }
 
   // No run clock: the sim runs indefinitely (timer removed).
 }
