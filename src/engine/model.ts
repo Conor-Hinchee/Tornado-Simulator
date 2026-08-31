@@ -50,8 +50,16 @@ export const STRUCTURES: Record<string, StructureType> = {
     w: 82, h: 66, chunks: 12, chunkMass: 1.3, color: '#ff8f5e',
   },
   silo: {
+    // Grain silo. Currently spawned as SCENERY next to a pasture (see the
+    // FARMSTEAD block in state.ts's resetWorld): the spawn overrides sbreak
+    // with a threshold above VMAX_CAP so the funnel can never touch it, but
+    // the real numbers below are left intact and correct — flipping the silo
+    // on later is deleting that one override line (plus giving it its own
+    // mid-air uproot shape, see [[structures_and_fence]]'s checklist).
+    // w/h is a nominal footprint; the drawn silo is 32 wide x 66 tall to the
+    // eave (81 with its dome) in world units, see useStructurePath.
     key: 'silo', label: 'Grain silo', breakWind: 136, ef: 3, hp: 250,
-    w: 52, h: 92, chunks: 11, chunkMass: 1.1, color: '#8fb7d8',
+    w: 32, h: 66, chunks: 11, chunkMass: 1.1, color: '#e6e0d2',
   },
   fence: {
     // ONE STRAIGHT SEGMENT of a pasture fence, not a whole square — 4 of
@@ -82,9 +90,23 @@ export const STRUCTURES: Record<string, StructureType> = {
     key: 'cow', label: 'Cow', breakWind: 35, ef: 0, hp: 5,
     w: 40, h: 30, chunks: 3, chunkMass: 0.2, color: '#fdfbf7',
   },
+  barn: {
+    // The farmstead barn — a gambrel-roofed red barn that stands beside the
+    // grain silo just outside one of the pastures. Like the silo it is
+    // SCENERY for now: the FARMSTEAD block in state.ts overrides sbreak with
+    // a threshold above VMAX_CAP, so it never takes damage, never uproots and
+    // never certifies a rating, no matter how strong the run gets. The
+    // numbers below are the ones it should have when it goes live (EF2, a
+    // notch under a house: a barn is a big timber shell, not a slab-built
+    // home), so switching it on is deleting the override.
+    // w/h is a nominal footprint; the drawn barn is 84 wide x 75 tall to the
+    // roof peak (90 with its cupola) in world units, see useStructurePath.
+    key: 'barn', label: 'Barn', breakWind: 120, ef: 2, hp: 200,
+    w: 84, h: 75, chunks: 10, chunkMass: 1.1, color: '#c8503f',
+  },
 };
 
-export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow'] as const;
+export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow', 'barn'] as const;
 export type StructureKey = (typeof STRUCTURE_ORDER)[number];
 
 export const EF_LABELS = ['EF0', 'EF1', 'EF2', 'EF3', 'EF4', 'EF5'];
@@ -147,7 +169,7 @@ export const TUNING = {
 
   // --- lift capacity ---
   // How many WHOLE structures of EACH TYPE the funnel can carry at once.
-  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow);
+  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn);
   // 0 means that type is NOT capped.
   //
   // Why per-type and not one shared pool: a shared pool was the first cut,
@@ -168,7 +190,7 @@ export const TUNING = {
   //
   // Uncapped types are still bounded by MAX_DEBRIS; that path now holds at
   // the brink too rather than silently destroying the structure.
-  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0],
+  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0, 2],
 
   // Extra simultaneous lifts granted per EF level, added to a capped type's
   // base above. NOTE: every structure in the field today is `ef: 0` (tree,

@@ -85,7 +85,7 @@ function makeRng(seed: number) {
  */
 export function createWorld(width: number, height: number): WorldState {
   const N = TUNING.MAX_DEBRIS;
-  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) = 124, with headroom)
+  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) + 1 barn + 1 silo = 126, with headroom)
   const f32 = (n: number) => makeMutable<Float32Array>(new Float32Array(n));
 
   const w: WorldState = {
@@ -169,7 +169,8 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   w.introUsed.value = 0;
   w.popVariant.value = 0;
 
-  // Field composition: a grove of trees + two pastures, EF1+ still parked.
+  // Field composition: a grove of trees + two pastures + one farmstead
+  // (barn + silo, scenery only for now). EF1+ still parked.
   const plan: string[] = [
     // EF0 phase: a grove of trees. Fences and cows are NOT listed here —
     // they're correlated groups (4 sides + a herd of 8 sharing one corral
@@ -332,6 +333,117 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
     }
   }
 
+  // ================= FARMSTEAD =================
+  // A barn and a grain silo standing side by side just outside ONE of the
+  // corrals, so the pasture, the herd and the farm buildings read as one
+  // place rather than three unrelated props dropped on a field.
+  //
+  // SCENERY, deliberately. Both are spawned as ordinary structure slots —
+  // they get depth scaling, ground shadows and the damage-shrink factor for
+  // free that way, and switching them on later is a one-line change — but
+  // their `sbreak` is overridden to SCENERY_BREAK, which is above VMAX_CAP
+  // (210). simulation.ts skips a structure whose local wind never exceeds
+  // sbreak, so these two can never take damage, never uproot, and can never
+  // certify their EF rating. Their real breakWind/ef/hp live in STRUCTURES
+  // and are untouched, ready for the day they go live.
+  //
+  // WHEN THEY DO GO LIVE: they have no mid-air uproot shape yet, so a
+  // destroyed one would tumble through the funnel drawn as the generic tree
+  // icon. Give each a `dtype`-filtered uproot path (the way uprootedFences /
+  // uprootedCows do) at the same time as removing the override.
+  const SCENERY_BREAK = 9999;
+  const bt = STRUCTURES.barn;
+  const bti = STRUCTURE_ORDER.indexOf('barn');
+  const st = STRUCTURES.silo;
+  const sti = STRUCTURE_ORDER.indexOf('silo');
+
+  // The pair's shared footprint, measured from the BARN's ground x: the barn
+  // is 84 wide (half 42) and the silo stands SILO_DX to its right, 32 wide
+  // (half 16). So the pair spans -46 .. +86 about the barn, i.e. a box of
+  // half-width 66 centred 20 to the barn's right. farmCx/farmCy below track
+  // that BOX centre (what every keep-out test uses); the barn's own ground
+  // position is derived back off it at the end.
+  const SILO_DX = 66; // silo centre, right of the barn's centre
+  const SILO_DY = -10; // and slightly further back, so it renders behind the barn
+  const farmOff = 20; // box centre, right of the barn's ground x
+  const farmHalfW = 66;
+  const farmHalfH = 40; // the pair are billboards; this is elbow room, not a real depth
+  const farmGap = 40; // clearance between the corral's rail and the nearest farm edge
+
+  // Try the four sides of the chosen corral in a rotated order (so which side
+  // the farm lands on varies by seed), and take the first that fits on the
+  // field. Every candidate clears the corral by construction — farmGap is the
+  // gap between the rail and the farm's own edge — so the only things left to
+  // test are the world bounds, the OTHER corral, and the tornado's start.
+  const farmCorral = Math.floor(rng() * CORRALS) % CORRALS;
+  const fcx = corralCx[farmCorral], fcy = corralCy[farmCorral];
+  const sideOff = fenceHalf + farmGap;
+  const sides: [number, number][] = [
+    [fcx + sideOff + farmHalfW, fcy],
+    [fcx - sideOff - farmHalfW, fcy],
+    [fcx, fcy + sideOff + farmHalfH],
+    [fcx, fcy - sideOff - farmHalfH],
+  ];
+  const first = Math.floor(rng() * sides.length) % sides.length;
+
+  const farmFits = (x: number, y: number) => {
+    if (x - farmHalfW < margin || x + farmHalfW > w.width - margin) return false;
+    if (y < topMargin + 20 || y > w.height - botMargin) return false;
+    // clear of BOTH corrals (the chosen one included — the offsets above
+    // already satisfy this, but the other corral is a real risk)
+    for (let k = 0; k < corralCx.length; k++) {
+      const okx = Math.abs(x - corralCx[k]) > fenceHalf + farmHalfW + 20;
+      const oky = Math.abs(y - corralCy[k]) > fenceHalf + farmHalfH + 20;
+      if (!okx && !oky) return false;
+    }
+    // clear of the tornado's start, same box test the corrals use
+    const okTx = Math.abs(x - w.width / 2) > farmHalfW + 90;
+    const okTy = Math.abs(y - w.height / 2) > farmHalfH + 90;
+    return okTx || okTy;
+  };
+
+  let farmCx = 0, farmCy = 0, farmPlaced = false;
+  for (let k = 0; k < sides.length && !farmPlaced; k++) {
+    const [cxi, cyi] = sides[(first + k) % sides.length];
+    if (farmFits(cxi, cyi)) { farmCx = cxi; farmCy = cyi; farmPlaced = true; }
+  }
+  if (!farmPlaced) {
+    // No side of the chosen corral works (a corral hard against a world edge,
+    // say). Fall back to anywhere on the field that passes the same tests —
+    // it stops being "the farm next to that pasture", but a farm somewhere
+    // beats no farm, and it still can't overlap anything.
+    let tries = 0;
+    while (!farmPlaced && tries++ < 60) {
+      const cxi = margin + farmHalfW + rng() * (w.width - 2 * (margin + farmHalfW));
+      const cyi = topMargin + 20 + rng() * (w.height - botMargin - topMargin - 20);
+      if (farmFits(cxi, cyi)) { farmCx = cxi; farmCy = cyi; farmPlaced = true; }
+    }
+    if (!farmPlaced) { farmCx = sides[first][0]; farmCy = sides[first][1]; }
+  }
+
+  const barnX = farmCx - farmOff;
+  const barnY = farmCy;
+  const farmProps: [typeof bt, number, number, number][] = [
+    [st, sti, barnX + SILO_DX, barnY + SILO_DY], // silo first: it stands further
+    [bt, bti, barnX, barnY],                     // back, and lower stype draws first
+  ];
+  for (let k = 0; k < farmProps.length; k++) {
+    const [t, ti, px, py] = farmProps[k];
+    sx[slot] = px;
+    sy[slot] = py;
+    shp[slot] = t.hp;
+    shpMax[slot] = t.hp;
+    sbreak[slot] = SCENERY_BREAK; // <- the ONE line that makes these scenery
+    sef[slot] = t.ef;
+    sw[slot] = t.w;
+    sh[slot] = t.h;
+    stype[slot] = ti;
+    schunks[slot] = t.chunks;
+    schunkMass[slot] = t.chunkMass;
+    salive[slot] = 1;
+    slot++;
+  }
+
   // Clearance so a generic prop (tree, ...) doesn't spawn overlapping a
   // corral's footprint: fenceHalf (the corral's own half-side) plus a margin
   // for a tree's own visual radius/lean, checked as a square keep-out box
@@ -361,7 +473,11 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
           break;
         }
       }
-      ok = okTornado && okFence;
+      // ...and off the farmstead, same square keep-out idea as the corrals,
+      // sized to the barn+silo box rather than a corral.
+      const okFarm =
+        Math.abs(x - farmCx) > farmHalfW + 30 || Math.abs(y - farmCy) > farmHalfH + 30;
+      ok = okTornado && okFence && okFarm;
     }
     sx[i] = x;
     sy[i] = y;

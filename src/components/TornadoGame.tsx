@@ -36,7 +36,7 @@ interface Hud {
   running: boolean;
 }
 
-const PROP_W = [34, 58, 52, 34, 0, 44]; // tree, trailer, house, silo, fence, cow. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
+const PROP_W = [34, 58, 52, 32, 0, 44, 84]; // tree, trailer, house, silo, fence, cow, barn. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
 
 // Rolling hills on the horizon: [baseY, amplitude, k1, k2, parallax], far to
 // near. baseY/amplitude are SCREEN px (these are backdrop, not world props, so
@@ -159,6 +159,11 @@ export default function TornadoGame({ width, height }: Props) {
 
   const FENCE_TYPE = STRUCTURE_ORDER.indexOf('fence'); // used by uprootedFences below and the fencePosts layer further down
   const COW_TYPE = STRUCTURE_ORDER.indexOf('cow'); // used by uprootedCows below and the cow branch in useStructurePath
+  // The farmstead pair. Both are SCENERY (state.ts spawns them with a
+  // breakWind above VMAX_CAP), so they only ever render ROOTED — neither has
+  // a mid-air uproot shape, and neither needs one until that override goes.
+  const SILO_TYPE = STRUCTURE_ORDER.indexOf('silo');
+  const BARN_TYPE = STRUCTURE_ORDER.indexOf('barn');
   const H = height;
   const cxScreen = width / 2;
   const K = TUNING.TILT_K;
@@ -564,10 +569,13 @@ export default function TornadoGame({ width, height }: Props) {
           path.lineTo(bx, by - bh - rh);
           path.lineTo(bx + w / 2 + 3 * sc, by - bh);
           path.close();
-        } else if (typeIndex === 3) {
-          const w = 34 * sc, bh = 56 * sc;
-          path.addRect(Skia.XYWHRect(bx - w / 2, by - bh, w, bh));
-          path.addCircle(bx, by - bh, w / 2);
+        } else if (typeIndex === SILO_TYPE) {
+          // grain silo BODY only — the concrete cylinder. Its stave bands and
+          // shaded side (siloShade) and its galvanized dome (farmRoofs) are
+          // separate type-filtered layers further down, same arrangement the
+          // fence has with fencePosts and the cow has with its detail layers.
+          // Local units: 32 wide, 66 tall to the eave; the dome adds 15 more.
+          path.addRRect(Skia.RRectXY(Skia.XYWHRect(bx - 16 * sc, by - 66 * sc, 32 * sc, 66 * sc), 3 * sc, 3 * sc));
         } else if (typeIndex === FENCE_TYPE) {
           // pasture fence RAILS: one straight segment (this structure is now
           // ONE SIDE of the corral, not the whole square — 4 independent
@@ -675,6 +683,32 @@ export default function TornadoGame({ width, height }: Props) {
           // head + snout
           path.addCircle(cpx(-12), cpy(24), 10 * sc);
           path.addOval(Skia.XYWHRect(cpx(-21.5), cpy(22), 12 * sc, 8 * sc));
+        } else if (typeIndex === BARN_TYPE) {
+          // barn WALLS + GABLE — the red silhouette. The slate gambrel roof
+          // (farmRoofs), the cream door / windows / hayloft / cupola
+          // (farmTrim) and the door's X brace (barnBrace) are their own
+          // layers below, painted over this in that order.
+          //
+          // NOTE this branch must stay an explicit `else if`, never a bare
+          // trailing `else`: it is currently the LAST link in the chain, and
+          // a bare else here would silently swallow whatever type is appended
+          // to STRUCTURE_ORDER next (exactly the bug the fence branch had
+          // before the cow was added).
+          //
+          // Local units, lx from the ground x / lh above ground: 84 wide,
+          // walls to lh 38, roof peak at 75, cupola finial at 90.
+          const bpx = (lx: number) => bx + lx * sc;
+          const bpy = (lh: number) => by - lh * sc;
+          path.addRect(Skia.XYWHRect(bpx(-42), bpy(38), 84 * sc, 38 * sc));
+          // gable face: the red showing between the eaves and the peak. Its
+          // outline follows the gambrel's own break so the roof band above it
+          // sits flush instead of leaving a red sliver at the kink.
+          path.moveTo(bpx(-42), bpy(38));
+          path.lineTo(bpx(-32), bpy(60));
+          path.lineTo(bpx(0), bpy(72));
+          path.lineTo(bpx(32), bpy(60));
+          path.lineTo(bpx(42), bpy(38));
+          path.close();
         }
       }
       return path;
@@ -687,6 +721,7 @@ export default function TornadoGame({ width, height }: Props) {
     useStructurePath(3),
     useStructurePath(4),
     useStructurePath(5),
+    useStructurePath(6),
   ];
 
   // Pasture fence posts: a SEPARATE, darker layer drawn under the fence's
@@ -772,6 +807,151 @@ export default function TornadoGame({ width, height }: Props) {
       // shadow over by that much so it doesn't pool out in front of its nose.
       const shx = stype[i] === COW_TYPE ? 16 * sc : 0;
       path.addOval(Skia.XYWHRect(bx + shx - rx, sy[i] - ry, rx * 2, ry * 2));
+    }
+    return path;
+  });
+
+  // ================= farmstead: barn + silo extra layers =================
+  // The barn's red walls/gable and the silo's cream cylinder are drawn
+  // generically by useStructurePath + the STRUCTURE_ORDER.map() JSX loop,
+  // like every other prop. These four layers paint the rest, in this order:
+  // siloShade (stave bands + the cylinder's shaded side) -> the dark INK
+  // OUTLINE, which is just the barn's and silo's own body paths re-stroked
+  // (the same trick the cow uses, and why the outlines match the herd's) ->
+  // farmRoofs (slate: the gambrel roof, the cupola cap, the silo dome) ->
+  // farmTrim (cream: door, windows, hayloft, cupola box) -> barnBrace (the
+  // red X on the door). Each loops every structure instance and recomputes
+  // `sc` (depth x damage-shrink) the way the body branches do, so the whole
+  // building would shrink as one piece if these ever became destructible.
+  //
+  // Sharing ONE slate for the barn roof and the silo dome is deliberate: it
+  // is what makes the two read as one farmstead rather than two props that
+  // happen to be near each other, and it saves a whole per-frame path pass.
+
+  // silo: the darker cream on its right flank (the cylinder's turn away from
+  // the light) plus four stave bands. Both are inset ~0.8 units from the
+  // body's edge so the body's rounded corners and a light rim survive
+  // underneath — there is no clipping in a Skia Path, so a full-width band
+  // would square the cylinder's corners off.
+  const siloShade = useDerivedValue(() => {
+    world.tick.value;
+    const path = Skia.Path.Make();
+    const sx = world.sx.value, sy = world.sy.value;
+    const stype = world.stype.value, salive = world.salive.value;
+    const shp = world.shp.value, shpMax = world.shpMax.value;
+    for (let i = 0; i < salive.length; i++) {
+      if (salive[i] === 0 || stype[i] !== SILO_TYPE) continue;
+      const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+      const [bx, p] = project(sx[i], sy[i]);
+      const sc = p * (0.72 + 0.28 * Math.max(dmg, 0));
+      const by = sy[i];
+      const spx = (lx: number) => bx + lx * sc;
+      const spy = (lh: number) => by - lh * sc;
+      path.addRect(Skia.XYWHRect(spx(7), spy(64), 8.2 * sc, 62 * sc));
+      for (let k = 1; k <= 4; k++) {
+        path.addRect(Skia.XYWHRect(spx(-15.2), spy(k * 13 + 1.1), 30.4 * sc, 2.2 * sc));
+      }
+    }
+    return path;
+  });
+
+  // slate roofs: the barn's gambrel band + its cupola cap, and the silo's
+  // dome + finial. One path, one color, both types.
+  const farmRoofs = useDerivedValue(() => {
+    world.tick.value;
+    const path = Skia.Path.Make();
+    const sx = world.sx.value, sy = world.sy.value;
+    const stype = world.stype.value, salive = world.salive.value;
+    const shp = world.shp.value, shpMax = world.shpMax.value;
+    for (let i = 0; i < salive.length; i++) {
+      if (salive[i] === 0) continue;
+      const t = stype[i];
+      if (t !== BARN_TYPE && t !== SILO_TYPE) continue;
+      const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+      const [bx, p] = project(sx[i], sy[i]);
+      const sc = p * (0.72 + 0.28 * Math.max(dmg, 0));
+      const by = sy[i];
+      const fx = (lx: number) => bx + lx * sc;
+      const fy = (lh: number) => by - lh * sc;
+      if (t === BARN_TYPE) {
+        // A gambrel is TWO slopes a side, not one: steep from the eave up to
+        // a break at lh 60, then shallow to the peak. Drawn as a closed BAND
+        // (out along the top edge, back along the inner edge) rather than a
+        // filled triangle, so the red gable shows below it.
+        path.moveTo(fx(-50), fy(35));
+        path.lineTo(fx(-34), fy(60));
+        path.lineTo(fx(0), fy(75));
+        path.lineTo(fx(34), fy(60));
+        path.lineTo(fx(50), fy(35));
+        path.lineTo(fx(44), fy(31));
+        path.lineTo(fx(32), fy(54));
+        path.lineTo(fx(0), fy(68));
+        path.lineTo(fx(-32), fy(54));
+        path.lineTo(fx(-44), fy(31));
+        path.close();
+        // cupola cap, sitting on the peak
+        path.moveTo(fx(-7.5), fy(83));
+        path.lineTo(fx(0), fy(90));
+        path.lineTo(fx(7.5), fy(83));
+        path.close();
+      } else {
+        // silo dome: the TOP HALF of an oval centred on the cylinder's eave.
+        // addArc(oval, 180, 180) traces left-edge -> over the top ->
+        // right-edge; close() lays the flat chord back across the eave.
+        path.addArc(Skia.XYWHRect(bx - 18.5 * sc, fy(66) - 15 * sc, 37 * sc, 30 * sc), 180, 180);
+        path.close();
+        path.addCircle(bx, fy(81), 3.2 * sc);
+      }
+    }
+    return path;
+  });
+
+  // cream trim on the barn: the big sliding door, a little window either side
+  // of it, the hayloft door up in the gable, and the cupola's box.
+  const farmTrim = useDerivedValue(() => {
+    world.tick.value;
+    const path = Skia.Path.Make();
+    const sx = world.sx.value, sy = world.sy.value;
+    const stype = world.stype.value, salive = world.salive.value;
+    const shp = world.shp.value, shpMax = world.shpMax.value;
+    for (let i = 0; i < salive.length; i++) {
+      if (salive[i] === 0 || stype[i] !== BARN_TYPE) continue;
+      const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+      const [bx, p] = project(sx[i], sy[i]);
+      const sc = p * (0.72 + 0.28 * Math.max(dmg, 0));
+      const by = sy[i];
+      const fx = (lx: number) => bx + lx * sc;
+      const fy = (lh: number) => by - lh * sc;
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-12), fy(25), 24 * sc, 25 * sc), 3 * sc, 3 * sc));
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-31), fy(29), 9 * sc, 9 * sc), 2 * sc, 2 * sc));
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(22), fy(29), 9 * sc, 9 * sc), 2 * sc, 2 * sc));
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-5.5), fy(55), 11 * sc, 10 * sc), 2 * sc, 2 * sc));
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-5), fy(83), 10 * sc, 8 * sc), 2 * sc, 2 * sc));
+    }
+    return path;
+  });
+
+  // the red X brace across the barn door. Its own STROKED layer because it
+  // has to be barn-red ON the cream door: as part of the body path it would
+  // pick up the ink outline and turn to mud at small scale.
+  const barnBrace = useDerivedValue(() => {
+    world.tick.value;
+    const path = Skia.Path.Make();
+    const sx = world.sx.value, sy = world.sy.value;
+    const stype = world.stype.value, salive = world.salive.value;
+    const shp = world.shp.value, shpMax = world.shpMax.value;
+    for (let i = 0; i < salive.length; i++) {
+      if (salive[i] === 0 || stype[i] !== BARN_TYPE) continue;
+      const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+      const [bx, p] = project(sx[i], sy[i]);
+      const sc = p * (0.72 + 0.28 * Math.max(dmg, 0));
+      const by = sy[i];
+      const fx = (lx: number) => bx + lx * sc;
+      const fy = (lh: number) => by - lh * sc;
+      path.moveTo(fx(-9), fy(3));
+      path.lineTo(fx(9), fy(22));
+      path.moveTo(fx(9), fy(3));
+      path.lineTo(fx(-9), fy(22));
     }
     return path;
   });
@@ -1394,6 +1574,21 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={cowMarkings} color="#2b2320" />
           <Path path={cowHighlights} color="#ffffff" />
           <Path path={cowMouth} color="#8a5a46" style="stroke" strokeWidth={1.4} strokeCap="round" />
+
+          {/* farmstead paint order (see the farm layers above): the silo's
+              shading and stave bands land on its cream cylinder, then BOTH
+              bodies are re-stroked in the same dark ink the cow uses, then
+              the slate roofs, then the cream trim, then the door's red X.
+              The bodies are stroked BEFORE the roofs go down so the wall
+              outline can't cut across the roof band. */}
+          <Path path={siloShade} color="#cdc4b1" />
+          <Path path={structurePaths[SILO_TYPE]} color="#33291f" style="stroke" strokeWidth={1.3} strokeJoin="round" />
+          <Path path={structurePaths[BARN_TYPE]} color="#33291f" style="stroke" strokeWidth={1.3} strokeJoin="round" />
+          <Path path={farmRoofs} color="#5b6875" />
+          <Path path={farmRoofs} color="#33291f" style="stroke" strokeWidth={1.3} strokeJoin="round" />
+          <Path path={farmTrim} color="#f7f1e3" />
+          <Path path={farmTrim} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
+          <Path path={barnBrace} color="#c8503f" style="stroke" strokeWidth={2.2} strokeCap="round" />
 
           {/* storm cloud drawn OVER the props so far ones tuck behind the horizon */}
           <Path path={cloudBack} color="#1e2a35" />
