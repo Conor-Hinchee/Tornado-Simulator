@@ -20,7 +20,8 @@ export interface WorldState {
   // progress up the funnel (0 base .. 1 top), drf = radius as a multiple of the
   // funnel's radius at that height.
   dalive: SharedValue<Float32Array>;  // 1 = active, 0 = free slot
-  dkind: SharedValue<Float32Array>;   // 0 = debris chunk, 1 = whole uprooted tree
+  dkind: SharedValue<Float32Array>;   // 0 = debris chunk, 1 = whole uprooted structure
+  dtype: SharedValue<Float32Array>;   // on a whole (kind=1) entity: origin STRUCTURE_ORDER index, so the render layer can pick a matching shape (e.g. a fence piece instead of the default tree icon)
   dphase: SharedValue<Float32Array>;  // angle around the funnel axis (rad)
   drf: SharedValue<Float32Array>;     // radial factor (x funnel radius at height dh)
   dtargrf: SharedValue<Float32Array>; // radial factor it eases toward
@@ -84,11 +85,11 @@ function makeRng(seed: number) {
  */
 export function createWorld(width: number, height: number): WorldState {
   const N = TUNING.MAX_DEBRIS;
-  const S = 40; // max structures
+  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) = 124, with headroom)
   const f32 = (n: number) => makeMutable<Float32Array>(new Float32Array(n));
 
   const w: WorldState = {
-    dalive: f32(N), dkind: f32(N), dphase: f32(N), drf: f32(N),
+    dalive: f32(N), dkind: f32(N), dtype: f32(N), dphase: f32(N), drf: f32(N),
     dtargrf: f32(N), dh: f32(N), drise: f32(N), dspin: f32(N),
     dspinv: f32(N), dsize: f32(N), dmass: f32(N), dtimer: f32(N),
 
@@ -138,6 +139,7 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   // fresh, empty debris pool (assign whole arrays so the UI thread sees them)
   w.dalive.value = new Float32Array(N);
   w.dkind.value = new Float32Array(N);
+  w.dtype.value = new Float32Array(N);
   w.dphase.value = new Float32Array(N);
   w.drf.value = new Float32Array(N);
   w.dtargrf.value = new Float32Array(N);
@@ -167,12 +169,20 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   w.introUsed.value = 0;
   w.popVariant.value = 0;
 
-  // Field composition: lots of trees, some trailers, fewer houses, a couple silos.
+  // Field composition: a grove of trees + two pastures, EF1+ still parked.
   const plan: string[] = [
-    // EF0 phase: a grove of trees. Destroying a tree certifies EF0 (rating goes
-    // "—" -> EF0) and shatters it into debris; eaten debris raises Vmax (the
-    // "peak mph" number). Mobile homes / EF1 come back once this phase feels right.
-    ...Array(26).fill('tree'),
+    // EF0 phase: a grove of trees. Fences and cows are NOT listed here —
+    // they're correlated groups (4 sides + a herd of 8 sharing one corral
+    // center) placed by the dedicated PASTURES block below, so each side
+    // and each cow can be knocked down independently instead of the whole
+    // square vanishing at once. Destroying a tree, a fence segment or a cow
+    // certifies EF0 (rating goes "—" -> EF0) and shatters it into debris;
+    // eaten debris raises Vmax (the "peak mph" number). Mobile homes / EF1
+    // come back once this phase feels right.
+    //
+    // Count is derived from world size, not chosen: hold ~1 prop per
+    // 10,400 world px² or the field goes sparse. See [[world-scale]].
+    ...Array(100).fill('tree'),
   ];
 
   const sx = new Float32Array(S);
@@ -193,16 +203,165 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   const botMargin = 55;
   const keepClear = 120; // don't spawn right on top of the tornado start
 
+  // ================= PASTURES =================
+  // Two corrals, each a square of 4 INDEPENDENT fence segments (one per side,
+  // so a side can be blown down without the whole square vanishing) with a
+  // herd of 8 cows standing inside it. Built by one loop rather than two
+  // copies of the same block: every corral is identical apart from where its
+  // center lands, and the tree keep-out below just iterates the centers this
+  // loop records.
+  //
+  // Placement: the world is split into CORRALS equal-width LANES and each
+  // corral is placed inside its own lane, which is what puts the second one
+  // out on the right. Lanes are how the two are guaranteed never to overlap —
+  // a pair of independent random centers in one big range would need an
+  // explicit corral-vs-corral rejection test and could thrash on retries. The
+  // `laneGutter` inset keeps them off their shared lane boundary too, so
+  // worst case they still sit ~60 world px apart instead of rail-to-rail.
+  const ft = STRUCTURES.fence;
+  const fti = STRUCTURE_ORDER.indexOf('fence');
+  const ct = STRUCTURES.cow;
+  const cti = STRUCTURE_ORDER.indexOf('cow');
+
+  // Half the corral's side, in world px. Everything else about a corral is
+  // DERIVED from this — the segment lengths, the herd layout inside it, and
+  // the tree keep-out box — so resizing the pastures is a one-number change.
+  const fenceHalf = 140;
+  const fenceSide = fenceHalf * 2; // corner-to-corner length of one side
+  const CORRALS = 2;
+  const laneGutter = 30;
+  const cowRows = [3, 2, 3]; // 8 cows per corral
+  const cowInset = 24; // keep the herd off the rails
+  const cowSpan = fenceSide - cowInset * 2;
+
+  const corralCx: number[] = [];
+  const corralCy: number[] = [];
+  let slot = plan.length;
+
+  const laneW = (w.width - 2 * margin) / CORRALS;
+  for (let k = 0; k < CORRALS; k++) {
+    const laneX0 = margin + k * laneW;
+    const inset = fenceHalf + laneGutter;
+    let fenceCx = 0, fenceCy = 0, fOk = false, fTries = 0;
+    while (!fOk && fTries++ < 60) {
+      fenceCx = laneX0 + inset + rng() * (laneW - 2 * inset);
+      fenceCy = topMargin + fenceHalf + rng() * (w.height - topMargin - botMargin - 2 * fenceHalf);
+      // Keep the tornado's START position outside the corral. This used to be
+      // a point check (`distance from center > keepClear`), which was fine
+      // when the corral was 110 units across but is wrong at 280: a center
+      // 130 units away passes a point check while the rails sit right on top
+      // of the funnel, so the run would open by eating the fence and the
+      // whole herd. Tested as a BOX against the corral's own footprint
+      // instead — the same square keep-out shape the tree loop uses below —
+      // plus a margin for the funnel's own radius.
+      const dx = Math.abs(fenceCx - w.width / 2);
+      const dy = Math.abs(fenceCy - w.height / 2);
+      const clear = fenceHalf + 40;
+      fOk = dx > clear || dy > clear;
+    }
+    corralCx.push(fenceCx);
+    corralCy.push(fenceCy);
+
+    // --- 4 fence sides ---
+    // [x, y, w, h] per segment; sw>=sh means horizontal (top/bottom), sh>sw
+    // means vertical (left/right). See useStructurePath's fence branch — it
+    // reads orientation straight back off sw/sh.
+    const fenceSegs: [number, number, number, number][] = [
+      [fenceCx, fenceCy - fenceHalf, fenceSide, 20], // top
+      [fenceCx, fenceCy + fenceHalf, fenceSide, 20], // bottom
+      [fenceCx - fenceHalf, fenceCy, 20, fenceSide], // left
+      [fenceCx + fenceHalf, fenceCy, 20, fenceSide], // right
+    ];
+    for (let sg = 0; sg < fenceSegs.length; sg++) {
+      const [sxp, syp, swp, shp2] = fenceSegs[sg];
+      sx[slot] = sxp;
+      sy[slot] = syp;
+      shp[slot] = ft.hp;
+      shpMax[slot] = ft.hp;
+      sbreak[slot] = ft.breakWind;
+      sef[slot] = ft.ef;
+      sw[slot] = swp;
+      sh[slot] = shp2;
+      stype[slot] = fti;
+      schunks[slot] = ft.chunks;
+      schunkMass[slot] = ft.chunkMass;
+      salive[slot] = 1;
+      slot++;
+    }
+
+    // --- herd of 8 ---
+    // Three staggered rows (3 / 2 / 3) rather than a plain grid: the middle
+    // row's two cows sit in the GAPS of the rows either side, which is what
+    // makes it read as a scattered herd instead of a parade. Row and column
+    // steps derive from fenceHalf, so a bigger corral spreads the herd out
+    // instead of leaving it clustered in the middle.
+    //
+    // Spacing is deliberately tight-but-not-touching: a cow's art spans 61
+    // world units nose-to-tail (lx -25..36.5) and project() scales world-x
+    // gaps by the SAME depth factor `p` it scales the cow's own art by, so a
+    // world-unit gap here stays a proportional gap on screen at any depth.
+    // With fenceHalf 140 the 3-cow rows step 77 units — about a 16-unit gap.
+    // Shrink the corral much below this and the herd starts to overlap; since
+    // all the cows share one Skia path per layer there is no per-instance
+    // z-ordering, so overlapping cows merge into one white blob.
+    for (let r = 0; r < cowRows.length; r++) {
+      const n = cowRows[r];
+      const rowY = fenceCy + (r - (cowRows.length - 1) / 2) * (cowSpan / cowRows.length);
+      for (let c = 0; c < n; c++) {
+        // -6 re-centers the cow: its art is asymmetric about its ground x
+        // (head hangs off the front), spanning lx -25..36.5.
+        const colX = fenceCx + (c - (n - 1) / 2) * (cowSpan / n) - 6;
+        // Jitter, so the rows aren't ruler-straight. Kept SMALL on x on
+        // purpose: neighbours in a 3-cow row sit ~16 units apart, and two
+        // cows leaning toward each other by more than half that would overlap
+        // into a single white blob.
+        sx[slot] = colX + (rng() - 0.5) * 10;
+        sy[slot] = rowY + (rng() - 0.5) * 10;
+        shp[slot] = ct.hp;
+        shpMax[slot] = ct.hp;
+        sbreak[slot] = ct.breakWind;
+        sef[slot] = ct.ef;
+        sw[slot] = ct.w;
+        sh[slot] = ct.h;
+        stype[slot] = cti;
+        schunks[slot] = ct.chunks;
+        schunkMass[slot] = ct.chunkMass;
+        salive[slot] = 1;
+        slot++;
+      }
+    }
+  }
+
+  // Clearance so a generic prop (tree, ...) doesn't spawn overlapping a
+  // corral's footprint: fenceHalf (the corral's own half-side) plus a margin
+  // for a tree's own visual radius/lean, checked as a square keep-out box
+  // around EACH corral center (matches the corral's actual square shape,
+  // rather than approximating it with a circle). Because the herd lives
+  // inside that box, this keeps trees off the cows for free.
+  const fenceClear = fenceHalf + 35;
+
   for (let i = 0; i < plan.length; i++) {
     const t = STRUCTURES[plan[i]];
     const ti = STRUCTURE_ORDER.indexOf(plan[i] as any);
+    // 60 tries, not 40: the corral keep-out boxes grew with fenceHalf and
+    // there are two of them now, so a random candidate is rejected more often
+    // and the search needs more attempts before it falls back to accepting
+    // whatever the last try landed on.
     let x = 0, y = 0, ok = false, tries = 0;
-    while (!ok && tries++ < 40) {
+    while (!ok && tries++ < 60) {
       x = margin + rng() * (w.width - 2 * margin);
       y = topMargin + rng() * (w.height - topMargin - botMargin);
       const dx = x - w.width / 2;
       const dy = y - w.height / 2;
-      ok = dx * dx + dy * dy > keepClear * keepClear;
+      const okTornado = dx * dx + dy * dy > keepClear * keepClear;
+      let okFence = true;
+      for (let k = 0; k < corralCx.length; k++) {
+        if (Math.abs(x - corralCx[k]) <= fenceClear && Math.abs(y - corralCy[k]) <= fenceClear) {
+          okFence = false;
+          break;
+        }
+      }
+      ok = okTornado && okFence;
     }
     sx[i] = x;
     sy[i] = y;

@@ -43,7 +43,7 @@ export function stepWorld(w: WorldState, dt: number): void {
   const vscale = TUNING.TORNADO_SCALE * (1 + 0.5 * (vmax / TUNING.VMAX_CAP));
 
   // debris & uprooted structures (funnel-relative particles; see state.ts)
-  const dalive = w.dalive.value, dkind = w.dkind.value, dphase = w.dphase.value;
+  const dalive = w.dalive.value, dkind = w.dkind.value, dtype = w.dtype.value, dphase = w.dphase.value;
   const drf = w.drf.value, dtargrf = w.dtargrf.value, dh = w.dh.value;
   const drise = w.drise.value, dspin = w.dspin.value, dspinv = w.dspinv.value;
   const dsize = w.dsize.value, dmass = w.dmass.value, dtimer = w.dtimer.value;
@@ -53,6 +53,23 @@ export function stepWorld(w: WorldState, dt: number): void {
   const sx = w.sx.value, sy = w.sy.value, shp = w.shp.value, shpMax = w.shpMax.value;
   const sbreak = w.sbreak.value, sef = w.sef.value, salive = w.salive.value;
   const schunks = w.schunks.value, schunkMass = w.schunkMass.value;
+  const stype = w.stype.value;
+
+  // How many WHOLE (kind=1) structures the funnel is already carrying, PER
+  // TYPE. Per-type is the whole point: one shared budget let a couple of fence
+  // sides freeze the herd behind them, since everything in a corral competes
+  // for the same slots. Counted fresh each frame rather than tracked
+  // incrementally, so it can't drift out of sync with the debris pool; the
+  // loop below increments it as it lifts more. dtype is only meaningful on
+  // kind=1 slots (chunks leave it stale), hence the dkind guard.
+  // Sized off the cap table rather than a literal, so appending a structure
+  // type to STRUCTURE_ORDER can't leave this array one slot short.
+  const aloftByType = TUNING.LIFT_CAP_BY_TYPE.map(() => 0);
+  for (let k = 0; k < N; k++) {
+    if (dalive[k] === 1 && dkind[k] === 1) aloftByType[dtype[k]]++;
+  }
+  let efIdx = w.maxEF.value;
+  if (efIdx < 0) efIdx = 0; else if (efIdx > 5) efIdx = 5;
 
   let strainTarget = 0; // 1 this frame if we're still wrestling a stubborn tree
   for (let i = 0; i < salive.length; i++) {
@@ -60,10 +77,24 @@ export function stepWorld(w: WorldState, dt: number): void {
     const rx = sx[i] - tx;
     const ry = sy[i] - ty;
     const r = Math.sqrt(rx * rx + ry * ry);
+    // Nothing outside the pull radius is touched at all, however strong the
+    // tornado is. Checked first so far-off props cost one compare — with 124
+    // structures in a 6x world most of the field is out of range on any
+    // given frame.
+    if (r >= TUNING.PULL_RADIUS) continue;
+
     // Damage intensity uses a flat-top core (full Vmax inside RMAX, 1/r falloff
     // outside) so sitting the funnel on a structure actually shreds it — the raw
     // Rankine field has a dead centre. See stack_and_build memory for the why.
-    const dwind = r <= rmax ? vmax : (vmax * rmax) / r;
+    //
+    // That 1/r tail then gets multiplied by a taper that reaches 0 at
+    // PULL_RADIUS, so the cap is a smooth rim rather than a hard edge. Without
+    // it a prop one pixel inside the radius would still be hit at full 1/r
+    // strength and die instantly while its neighbour one pixel out was
+    // untouched — a visible ring sweeping through the grove. See PULL_RADIUS
+    // in model.ts for the numbers this changes.
+    const taper = 1 - Math.pow(r / TUNING.PULL_RADIUS, TUNING.PULL_FALLOFF);
+    const dwind = (r <= rmax ? vmax : (vmax * rmax) / r) * taper;
     if (dwind <= sbreak[i]) continue; // threshold gate: below it, nothing happens
 
     shp[i] -= (dwind - sbreak[i]) * TUNING.DAMAGE_K * dt;
@@ -83,10 +114,34 @@ export function stepWorld(w: WorldState, dt: number): void {
       continue;
     }
 
-    // destroyed -> UPROOT: certify EF now, and hand the whole structure to the
+    // hp is gone. Two things can still stop the funnel taking it THIS frame:
+    // its own TYPE's lift cap is full, or the debris pool is out of slots. In
+    // either case hold the structure at the BRINK — hp pinned just above zero,
+    // so it stays rooted and fully damage-shrunk — and let it pop the instant
+    // capacity frees up. Damage keeps landing, so it re-enters this branch
+    // every frame until it gets a turn.
+    //
+    // The cap is per-type, so a queue of trees never blocks a cow or a fence
+    // side (`0` in LIFT_CAP_BY_TYPE = that type is uncapped).
+    //
+    // The pool case used to fall through and destroy the structure anyway
+    // without a slot, which made it vanish with no debris and no Vmax gain —
+    // silent, and invisible until you counted props. Same guard now covers it.
+    const ti = stype[i];
+    const capBase = TUNING.LIFT_CAP_BY_TYPE[ti];
+    if (capBase > 0 && aloftByType[ti] >= capBase + TUNING.LIFT_CAP_EF_STEP * efIdx) {
+      shp[i] = 0.0001;
+      continue;
+    }
+    let slot = -1;
+    for (let k = 0; k < N; k++) { if (dalive[k] === 0) { slot = k; break; } }
+    if (slot < 0) { shp[i] = 0.0001; continue; }
+
+    // taken -> UPROOT: certify EF now, and hand the whole structure to the
     // vortex as ONE spinning entity. It spirals in, rises a little, and only
     // later bursts into chunks (handled in the debris loop below).
     salive[i] = 0;
+    aloftByType[ti]++;
     if (sef[i] > w.maxEF.value) w.maxEF.value = sef[i];
     // "big O!" — always on a hard struggle pull, and now and then even while
     // freely eating trees, for a little spontaneous delight
@@ -95,24 +150,21 @@ export function stepWorld(w: WorldState, dt: number): void {
       w.popVariant.value = Math.random() < TUNING.POP_OPEN_CHANCE ? 1 : 0;
     }
 
-    let slot = -1;
-    for (let k = 0; k < N; k++) { if (dalive[k] === 0) { slot = k; break; } }
-    if (slot >= 0) {
-      let rf = r / (TUNING.FUNNEL_BASE_R * vscale);
-      if (rf < 1) rf = 1; else if (rf > 5) rf = 5;
-      dkind[slot] = 1; // whole tree
-      dphase[slot] = Math.atan2(ry, rx); // its real bearing from the core
-      drf[slot] = rf; // start at its real distance...
-      dtargrf[slot] = 1.0; // ...and spiral onto the funnel surface
-      dh[slot] = 0;
-      drise[slot] = schunks[i]; // reused on a whole tree: chunk count for the burst
-      dspin[slot] = 0;
-      dspinv[slot] = TUNING.TREE_TUMBLE;
-      dsize[slot] = TUNING.TREE_SIZE;
-      dmass[slot] = schunkMass[i]; // reused on a whole tree: base chunk mass
-      dtimer[slot] = TUNING.UPROOT_TIME;
-      dalive[slot] = 1;
-    }
+    let rf = r / (TUNING.FUNNEL_BASE_R * vscale);
+    if (rf < 1) rf = 1; else if (rf > 5) rf = 5;
+    dkind[slot] = 1; // whole structure
+    dtype[slot] = stype[i]; // remember what it was, for the render layer
+    dphase[slot] = Math.atan2(ry, rx); // its real bearing from the core
+    drf[slot] = rf; // start at its real distance...
+    dtargrf[slot] = 1.0; // ...and spiral onto the funnel surface
+    dh[slot] = 0;
+    drise[slot] = schunks[i]; // reused on a whole tree: chunk count for the burst
+    dspin[slot] = 0;
+    dspinv[slot] = TUNING.TREE_TUMBLE;
+    dsize[slot] = TUNING.TREE_SIZE;
+    dmass[slot] = schunkMass[i]; // reused on a whole tree: base chunk mass
+    dtimer[slot] = TUNING.UPROOT_TIME;
+    dalive[slot] = 1;
   }
 
   // --- debris & uprooted trees: coil UP the funnel ---

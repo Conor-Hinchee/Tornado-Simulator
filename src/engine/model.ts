@@ -53,9 +53,38 @@ export const STRUCTURES: Record<string, StructureType> = {
     key: 'silo', label: 'Grain silo', breakWind: 136, ef: 3, hp: 250,
     w: 52, h: 92, chunks: 11, chunkMass: 1.1, color: '#8fb7d8',
   },
+  fence: {
+    // ONE STRAIGHT SEGMENT of a pasture fence, not a whole square — 4 of
+    // these are spawned together (see the dedicated pasture-fence block in
+    // state.ts's resetWorld, not the generic per-plan-item loop) to outline
+    // a square corral, each with its OWN hp so a side can be knocked down
+    // independently of its neighbors. w/h here is just the DEFAULT/reference
+    // orientation (w = length, h = thickness marker; a spawned instance sets
+    // its own sw/sh — w>=h means horizontal, h>w means vertical — see
+    // useStructurePath's fence branch, TornadoGame.tsx). Peaked dark posts
+    // (fencePosts) show through gaps in two thick rail bands (this color).
+    // Weaker than a tree (real fences fail before trees do), so it tends to
+    // go first, and stays inside the EF0 phase.
+    key: 'fence', label: 'Fence', breakWind: 50, ef: 0, hp: 8,
+    w: 110, h: 20, chunks: 4, chunkMass: 0.25, color: '#c9793f',
+  },
+  cow: {
+    // The pasture cow — was purely decorative (fixed cowX/cowY scalars in
+    // state.ts, no STRUCTURES entry) until "lets eat the cow!!": now a real,
+    // single-instance structure spawned at the fence's own center (see
+    // state.ts's resetWorld, right after the fence's 4 segments), so it
+    // goes through the exact same generic damage/uproot/debris pipeline as
+    // every other prop — no simulation.ts changes needed. Deliberately the
+    // WEAKEST thing in the field (lighter than even the fence) so it gets
+    // gobbled up fast once the funnel reaches the pasture — a quick, fun
+    // snack, not a real obstacle. w/h is a nominal footprint only (unlike
+    // fence, this instance never repurposes sw/sh for orientation).
+    key: 'cow', label: 'Cow', breakWind: 35, ef: 0, hp: 5,
+    w: 40, h: 30, chunks: 3, chunkMass: 0.2, color: '#fdfbf7',
+  },
 };
 
-export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo'] as const;
+export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow'] as const;
 export type StructureKey = (typeof STRUCTURE_ORDER)[number];
 
 export const EF_LABELS = ['EF0', 'EF1', 'EF2', 'EF3', 'EF4', 'EF5'];
@@ -86,6 +115,82 @@ export const TUNING = {
   // --- damage ---
   DAMAGE_K: 1.4, // hp lost per (mph over threshold) per second
 
+  // --- pull radius cap ---
+  // Hard outer limit (world px) on how far the damage field reaches, no
+  // matter how strong the tornado gets.
+  //
+  // Why this exists: the Rankine field falls off as 1/r, so the radius at
+  // which a prop still takes damage grows LINEARLY with Vmax — reach =
+  // Vmax * RMAX / breakWind. At the EF0 peak (VMAX_CAP 210) that put the
+  // cow-eating radius at 348px, wider than an entire 280px corral, so the
+  // funnel could sit ~200px OUTSIDE a pasture and still vacuum up the herd
+  // and the fence without ever entering it. It also badly overran the drawn
+  // funnel, so the physics reached much further than anything on screen
+  // suggested it should.
+  //
+  // PULL_RADIUS is that ceiling; PULL_FALLOFF is how sharply the field
+  // tapers into it. The taper is `1 - (r / PULL_RADIUS) ^ PULL_FALLOFF`,
+  // clamped at 0 — a high exponent keeps the near field essentially
+  // untouched (at r = RMAX the multiplier is 0.999) and does all its work
+  // out at the rim, so the early game feels the same and only the
+  // late-game overreach is cut. At 210 mph this takes the cow radius
+  // 348 -> 162, fence 244 -> 153, tree 187 -> 142; at the 70 mph start the
+  // cow radius only moves 116 -> 110 and the tree radius not at all.
+  //
+  // Lower PULL_RADIUS to force the funnel further into a pasture before it
+  // can clear one. Note this caps REACH, not damage rate: anything inside
+  // the radius at full Vmax still dies almost instantly (a 5hp cow in
+  // ~0.05s), so if clearing a corral still feels too easy the next knobs
+  // are DAMAGE_K and the per-structure hp, not this.
+  PULL_RADIUS: 180,
+  PULL_FALLOFF: 6,
+
+  // --- lift capacity ---
+  // How many WHOLE structures of EACH TYPE the funnel can carry at once.
+  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow);
+  // 0 means that type is NOT capped.
+  //
+  // Why per-type and not one shared pool: a shared pool was the first cut,
+  // and it made the pasture feel broken. Driving into a corral, one fence
+  // side and one cow would lift and everything else sat frozen at the brink
+  // waiting its turn — the herd read as stuck rather than as a queue, because
+  // a corral holds 12 destructible things and they were all competing for the
+  // same 4 slots. Trees are the case the cap was actually for (a dense grove
+  // vanishing in one frame), so the cap now lives on trees and the pasture
+  // lifts freely.
+  //
+  // A capped type whose hp runs out while its own cap is full is held at the
+  // BRINK (hp pinned just above zero, so it stays rooted and fully
+  // damage-shrunk) and pops the instant one of ITS OWN kind frees a slot,
+  // which happens every UPROOT_TIME (0.8s) as each whole entity bursts into
+  // chunks. So a cap is really a throughput limit: cap / UPROOT_TIME of that
+  // type per second, in visible batches — ~5 trees/s at EF0.
+  //
+  // Uncapped types are still bounded by MAX_DEBRIS; that path now holds at
+  // the brink too rather than silently destroying the structure.
+  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0],
+
+  // Extra simultaneous lifts granted per EF level, added to a capped type's
+  // base above. NOTE: every structure in the field today is `ef: 0` (tree,
+  // fence, cow), so maxEF never climbs past 0 and this currently contributes
+  // NOTHING — the caps resolve to their base values. It only starts mattering
+  // when EF1+ props (mobile homes) come back into `plan`, see state.ts.
+  LIFT_CAP_EF_STEP: 2,
+
+  // --- tree sway ---
+  // A tree leans toward the funnel by ROTATING about its base through this
+  // many radians at full wind (~17deg), clamped to TREE_BEND_MAX (~34deg)
+  // once the near-death "grab" multiplies it.
+  //
+  // It rotates rather than translating, which was the fix for trees looking
+  // "too stretchy": the old code displaced the trunk top and canopy sideways
+  // while leaving the trunk's vertical length fixed, so the trunk quad's
+  // diagonal grew with the lean and the canopy drifted away from the trunk
+  // top — up to 80px of sideways offset on a 16px trunk. Rotating about the
+  // base preserves every length, so the tree bends as one rigid piece.
+  TREE_BEND: 0.30,
+  TREE_BEND_MAX: 0.60,
+
   // --- steering ---
   STEER_EASE: 2.5, // how quickly the tornado chases the drag target (lower = slower/weightier)
 
@@ -99,10 +204,45 @@ export const TUNING = {
   FUNNEL_HEIGHT: 200, // screen px the funnel rises from its base
   FUNNEL_BASE_R: 26, // funnel radius at the ground (narrow)
   FUNNEL_TOP_R: 108, // funnel radius at the top (wide)
-  FUNNEL_RINGS: 17, // stacked ellipse rings up the funnel
+  FUNNEL_RINGS: 17, // RETIRED (the funnel is one continuous silhouette now, not stacked rings)
   FUNNEL_DOTS: 15, // swirling dots per ring
   RING_FLATTEN: 0.34, // ellipse y/x ratio — sells the tilt of each ring
   FUNNEL_TWIST: 2.2, // how much the arms coil from base to top
+
+  // --- turbulence / dirt-devil texture (wind-swept look) ---
+  FUNNEL_JITTER: 0.16, // radians of chaotic wobble added to each strand sample
+  FUNNEL_JITTER_FREQ: 0.15, // how fast the turbulence noise churns per frame (tick)
+  DUST_COUNT: 46, // ground-hugging swirling grit particles around the funnel base
+  DUST_SPREAD: 1.9, // how far the dust skirt spreads beyond the funnel base radius
+  WIND_STREAK_COUNT: 24, // short tangent speed-lines swept around the funnel surface
+  RING_TWIST_COIL: 0.18, // how far the cone's center spirals off-axis at each height (x its own radius)
+  FUNNEL_SPIN: 1.4, // how fast the whole cone's coil rotates (shared by EVERY funnel layer)
+  // Silhouette profile. The radius follows a POWER curve (thin tail, fast flare)
+  // and then rolls back in above DOME_START so the top rounds over into a billowy
+  // cap instead of ending in a flat "bucket rim".
+  FUNNEL_TAIL_R: 16, // drawn radius at the ground: the thin twisty tail (widened 2026-08-31, was too tapered)
+  FUNNEL_TAPER: 1.5, // >1 keeps the lower funnel thin and flares it near the top (lowered 2026-08-31 to widen the base)
+  FUNNEL_DOME: 0, // how far the radius pulls back in at the very top (2026-08-31: user wants the top taper gone, top stays full width)
+  FUNNEL_DOME_START: 0.72, // height where the dome roll-off begins
+  FUNNEL_BANDS: 6, // helical shading ribbons wrapping the cone
+  FUNNEL_BAND_SWEEP: 250, // degrees each dark shading ribbon wraps around the cone
+  FUNNEL_BAND_LIGHT_SWEEP: 150, // degrees each light highlight ribbon wraps
+  FUNNEL_BAND_RISE: 0.1, // how much height a ribbon climbs while it wraps (the helix)
+  FUNNEL_BAND_THICK: 0.075, // ribbon thickness in height units
+  // Swoosh ribbons orbit WIDER than the body, so they're visible in the air on
+  // both sides and only hidden across the stretch that passes behind the funnel.
+  SWOOSH_R: 1.32, // swoosh orbit radius as a multiple of the body radius
+  SWOOSH_SWEEP: 215, // base degrees a swoosh wraps (plus a per-ribbon jitter)
+  // Viewing angle, driven by the DIRECTION OF TRAVEL (not screen position):
+  // driving toward the camera tips the funnel so you see down into its open top;
+  // driving away tips it over so the top rotates out of sight. Standing still is
+  // the neutral mid view. Drives every ring's y/x ratio.
+  VIEW_FLAT_MIN: 0.18, // ring flatten multiplier when driving away (edge-on, top hidden)
+  VIEW_FLAT_RANGE: 1.42, // extra flatten gained as it turns toward the camera
+  VIEW_NEUTRAL: 0.55, // the view value while standing still
+  LEAN_REF_SPEED: 260, // px/s of travel that counts as a "full" lean
+  LEAN_EASE: 4.0, // how fast the lean follows a change of direction
+  LEAN_X_PX: 26, // how far the funnel's top leans into left/right travel
 
   // --- debris loft (the z axis, render + light integration only) ---
   LOFT_MAX: 70, // max height (px) debris rises in the updraft
@@ -120,7 +260,7 @@ export const TUNING = {
   UPROOT_TIME: 0.8, // seconds a tree spins around whole before it shatters
   UPROOT_INWARD: 3.8, // how fast an uprooted tree spirals in onto the funnel
   UPROOT_RISE: 2.9, // how fast an uprooted tree climbs while still whole
-  TREE_RISE_H: 0.22, // height (0..1) an uprooted tree reaches before bursting
+  TREE_RISE_H: 0.42, // height (0..1) an uprooted tree reaches before bursting
   TREE_TUMBLE: 7.0, // self-rotation speed (rad/s) of a tumbling whole tree
   TREE_SIZE: 22, // render size (px) of a whole uprooted tree
   CHUNK_RISE_MIN: 0.26, // chunk ascent rate (h per second) range after a burst
@@ -143,7 +283,7 @@ export const TUNING = {
   TORNADO_SCALE: 0.75,
 
   // --- capacity ---
-  MAX_DEBRIS: 360,
+  MAX_DEBRIS: 480, // raised with the 6x world / 100-tree grove. This is a pure capacity ceiling, not a feel knob — but it fails SILENTLY: simulation.ts's chunk burst does `if (slot < 0) break`, so an exhausted pool makes a destroyed prop vanish with no debris and no Vmax gain. Trees burst into 5 chunks each.
 };
 
 /** Convert a peak wind (mph) to an EF rating index using EF-scale wind bands. */
