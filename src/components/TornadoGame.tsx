@@ -220,7 +220,7 @@ export default function TornadoGame({ width, height }: Props) {
       const k1 = HILLS[layer][2], k2 = HILLS[layer][3], par = HILLS[layer][4];
       const camX = Math.max(0, Math.min(camMax, world.tornadoX.value - width / 2));
       const off = camX * par;
-      const path = Skia.Path.Make();
+      const path = Skia.PathBuilder.Make();
       const N = 40;
       for (let i = 0; i <= N; i++) {
         const x = (i / N) * width;
@@ -231,7 +231,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.lineTo(width, height);
       path.lineTo(0, height);
       path.close();
-      return path;
+      return path.detach();
     });
 
   const hillPaths = [useHillPath(0), useHillPath(1), useHillPath(2)];
@@ -319,7 +319,7 @@ export default function TornadoGame({ width, height }: Props) {
   // funnel strands are drawn with, so they read as part of the wind) ----
   const debrisChunks = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const alive = world.dalive.value, kind = world.dkind.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -337,7 +337,7 @@ export default function TornadoGame({ width, height }: Props) {
       const cy = ccy + Math.sin(rot) * ry;
       path.addCircle(cx, cy, dsz[i] * pb * (0.6 + 0.4 * (1 - h)));
     }
-    return path;
+    return path.detach();
   });
 
   // uprootedTrees: the DEFAULT whole-entity render — a trunk quad + canopy
@@ -348,7 +348,7 @@ export default function TornadoGame({ width, height }: Props) {
   // [[structures_and_fence]] for why that's fine to leave as-is for now.
   const uprootedTrees = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -376,7 +376,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.close();
       path.addCircle(cx + ca * (len * 0.75), cy + sa * (len * 0.75), 0.78 * sc);
     }
-    return path;
+    return path.detach();
   });
 
   // uprootedFences: a tumbling fence PIECE (a long plank + a small post-stub
@@ -386,7 +386,7 @@ export default function TornadoGame({ width, height }: Props) {
   // approach as uprootedTrees, just a different silhouette.
   const uprootedFences = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -417,7 +417,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.addRect(Skia.XYWHRect(bxr - stub / 2, byr - stub / 2, stub, stub));
       path.addRect(Skia.XYWHRect(bxt - stub / 2, byt - stub / 2, stub, stub));
     }
-    return path;
+    return path.detach();
   });
 
   // uprootedCows: a tumbling cow — chubby body quad + a bigger head circle
@@ -428,7 +428,7 @@ export default function TornadoGame({ width, height }: Props) {
   // swallow it, and it should look like ITSELF while flying in, not a tree.
   const uprootedCows = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -455,12 +455,12 @@ export default function TornadoGame({ width, height }: Props) {
       path.close();
       path.addCircle(bxt + ca * (len * 0.3), byt + sa * (len * 0.3), 0.62 * sc); // big chibi head
     }
-    return path;
+    return path.detach();
   });
 
   const uprootedCowMarkings = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
@@ -482,7 +482,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.addCircle(cx - ca * (len * 0.15), cy - sa * (len * 0.15), 0.2 * sc); // one holstein spot
       path.addCircle(headX + ca * 0.2 * sc, headY + sa * 0.2 * sc, 0.12 * sc); // eye dot
     }
-    return path;
+    return path.detach();
   });
 
   // ---- cute prop billboards ----
@@ -491,7 +491,7 @@ export default function TornadoGame({ width, height }: Props) {
   const useStructurePath = (typeIndex: number) =>
     useDerivedValue(() => {
       world.tick.value;
-      const path = Skia.Path.Make();
+      const path = Skia.PathBuilder.Make();
       const sx = world.sx.value, sy = world.sy.value;
       const stype = world.stype.value, salive = world.salive.value;
       const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -711,7 +711,7 @@ export default function TornadoGame({ width, height }: Props) {
           path.close();
         }
       }
-      return path;
+      return path.detach();
     });
 
   const structurePaths = [
@@ -732,7 +732,7 @@ export default function TornadoGame({ width, height }: Props) {
   // picket-and-rail look needs two tones.
   const fencePosts = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -769,12 +769,12 @@ export default function TornadoGame({ width, height }: Props) {
         path.close();
       }
     }
-    return path;
+    return path.detach();
   });
 
   const propShadows = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -808,7 +808,7 @@ export default function TornadoGame({ width, height }: Props) {
       const shx = stype[i] === COW_TYPE ? 16 * sc : 0;
       path.addOval(Skia.XYWHRect(bx + shx - rx, sy[i] - ry, rx * 2, ry * 2));
     }
-    return path;
+    return path.detach();
   });
 
   // ================= farmstead: barn + silo extra layers =================
@@ -835,7 +835,7 @@ export default function TornadoGame({ width, height }: Props) {
   // would square the cylinder's corners off.
   const siloShade = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -852,14 +852,14 @@ export default function TornadoGame({ width, height }: Props) {
         path.addRect(Skia.XYWHRect(spx(-15.2), spy(k * 13 + 1.1), 30.4 * sc, 2.2 * sc));
       }
     }
-    return path;
+    return path.detach();
   });
 
   // slate roofs: the barn's gambrel band + its cupola cap, and the silo's
   // dome + finial. One path, one color, both types.
   const farmRoofs = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -903,14 +903,14 @@ export default function TornadoGame({ width, height }: Props) {
         path.addCircle(bx, fy(81), 3.2 * sc);
       }
     }
-    return path;
+    return path.detach();
   });
 
   // cream trim on the barn: the big sliding door, a little window either side
   // of it, the hayloft door up in the gable, and the cupola's box.
   const farmTrim = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -928,7 +928,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-5.5), fy(55), 11 * sc, 10 * sc), 2 * sc, 2 * sc));
       path.addRRect(Skia.RRectXY(Skia.XYWHRect(fx(-5), fy(83), 10 * sc, 8 * sc), 2 * sc, 2 * sc));
     }
-    return path;
+    return path.detach();
   });
 
   // the red X brace across the barn door. Its own STROKED layer because it
@@ -936,7 +936,7 @@ export default function TornadoGame({ width, height }: Props) {
   // pick up the ink outline and turn to mud at small scale.
   const barnBrace = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -953,7 +953,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.moveTo(fx(9), fy(3));
       path.lineTo(fx(-9), fy(22));
     }
-    return path;
+    return path.detach();
   });
 
   // ================= cute pasture cow: extra layers =================
@@ -979,7 +979,7 @@ export default function TornadoGame({ width, height }: Props) {
   // re-filled here in horn color over the white
   const cowHorns = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1001,7 +1001,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.lineTo(px(-9.5), py(33));
       path.close();
     }
-    return path;
+    return path.detach();
   });
 
   // the pink bits: snout, inner ears, udder + teats. The snout and udder
@@ -1009,7 +1009,7 @@ export default function TornadoGame({ width, height }: Props) {
   // the white, then re-stroked in the JSX so they keep their outline.
   const cowPink = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1029,12 +1029,12 @@ export default function TornadoGame({ width, height }: Props) {
       path.addCircle(px(14.5), py(7.8), 1.4 * sc); // teats
       path.addCircle(px(19.5), py(7.8), 1.4 * sc);
     }
-    return path;
+    return path.detach();
   });
 
   const cowMarkings = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1070,13 +1070,13 @@ export default function TornadoGame({ width, height }: Props) {
       path.addCircle(px(-13), py(18), 1.1 * sc);
       path.addCircle(px(33.5), py(19), 2.8 * sc);
     }
-    return path;
+    return path.detach();
   });
 
   // tiny sparkle in each eye, painted last over the dark pupils
   const cowHighlights = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1092,7 +1092,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.addCircle(px(-16.8), py(27.5), 0.9 * sc);
       path.addCircle(px(-8.8), py(27.5), 0.9 * sc);
     }
-    return path;
+    return path.detach();
   });
 
   // the tail. Deliberately NOT part of the body path: as a filled polyline it
@@ -1102,7 +1102,7 @@ export default function TornadoGame({ width, height }: Props) {
   // outlined whip with round joins for free.
   const cowTail = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1121,14 +1121,14 @@ export default function TornadoGame({ width, height }: Props) {
       path.lineTo(px(36), py(25));
       path.lineTo(px(34), py(21));
     }
-    return path;
+    return path.detach();
   });
 
   // small stroked smile on the snout, same addArc(20deg, 140deg sweep) as the
   // tornado's own relaxed-face mouth
   const cowMouth = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const sx = world.sx.value, sy = world.sy.value;
     const stype = world.stype.value, salive = world.salive.value;
     const shp = world.shp.value, shpMax = world.shpMax.value;
@@ -1145,7 +1145,7 @@ export default function TornadoGame({ width, height }: Props) {
       const mcx = px(-15.5), mcy = py(16.5);
       path.addArc(Skia.XYWHRect(mcx - mw / 2, mcy - mh / 2, mw, mh), 20, 140);
     }
-    return path;
+    return path.detach();
   });
 
   // ================= funnel body =================
@@ -1156,7 +1156,7 @@ export default function TornadoGame({ width, height }: Props) {
   const funnelBodyPath = () => {
     'worklet';
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const N = 24;
     for (let i = 0; i <= N; i++) {
       const [cx, cy, rr] = coneAt(i / N, bx, pb, baseY, swayX, vscale, s);
@@ -1175,7 +1175,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.lineTo(cx + rr, cy);
     }
     path.close(); // flat across the tail tip; the ground shadow covers the join
-    return path;
+    return path.detach();
   };
 
   const funnelBody = useDerivedValue(() => {
@@ -1189,7 +1189,7 @@ export default function TornadoGame({ width, height }: Props) {
   const buildBands = (startH: number, sweepDeg: number, offsetDeg: number, thick: number) => {
     'worklet';
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const nb = TUNING.FUNNEL_BANDS;
     const span = (sweepDeg * Math.PI) / 180;
     const off = (offsetDeg * Math.PI) / 180;
@@ -1219,8 +1219,8 @@ export default function TornadoGame({ width, height }: Props) {
     // clip the shading to the silhouette: a ribbon's ellipse dips below its own
     // height, so without this it spills past the body edge and breaks the illusion
     // that this is ONE object.
-    path.op(funnelBodyPath(), PathOp.Intersect);
-    return path;
+    const bands = path.detach();
+    return Skia.Path.MakeFromOp(bands, funnelBodyPath(), PathOp.Intersect) ?? bands;
   };
 
   const funnelBandsDark = useDerivedValue(() =>
@@ -1237,9 +1237,9 @@ export default function TornadoGame({ width, height }: Props) {
     const [cx, cy, rr] = coneAt(1, bx, pb, baseY, swayX, vscale, s);
     const r = rr * 0.62;
     const ry = r * flat;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     path.addOval(Skia.XYWHRect(cx - r, cy - ry * 0.7, r * 2, ry * 2));
-    return path;
+    return path.detach();
   });
 
   // the top opening closes off entirely once the funnel tips away from us
@@ -1255,7 +1255,7 @@ export default function TornadoGame({ width, height }: Props) {
   const buildSwoosh = (side: number) => {
     'worklet';
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const heights = [0.22, 0.5, 0.8];
     const M = 40;
     for (let bi = 0; bi < heights.length; bi++) {
@@ -1289,7 +1289,7 @@ export default function TornadoGame({ width, height }: Props) {
         }
       }
     }
-    return path;
+    return path.detach();
   };
 
   const swooshBack = useDerivedValue(() => buildSwoosh(-1));
@@ -1301,7 +1301,7 @@ export default function TornadoGame({ width, height }: Props) {
     const [, lift] = agitOffset(pb);
     const cx = bx + swayX * 0.4;
     const cy = world.tornadoY.value - lift * 0.5; // base swirl lifts partway with the funnel
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     for (let k = 0; k < 4; k++) {
       const jitter = hash1(k * 2.3);
       const rad = TUNING.RMAX * (1.3 + 0.5 * k + jitter * 0.18) * pb * vscale;
@@ -1310,14 +1310,14 @@ export default function TornadoGame({ width, height }: Props) {
       const sweep = 110 + hash1(k * 1.7 + 9) * 70; // varying length -> less mechanical
       path.addArc(Skia.XYWHRect(cx - rad, cy - ry, rad * 2, ry * 2), startDeg, sweep);
     }
-    return path;
+    return path.detach();
   });
 
   // ---- ground-hugging dust skirt: swirling grit spread wide around the base,
   // the classic dirt-devil silhouette (a dust column, not just a clean funnel) ----
   const dustSkirt = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const funnelR = TUNING.FUNNEL_BASE_R * pb * vscale;
     const n = TUNING.DUST_COUNT;
@@ -1335,14 +1335,14 @@ export default function TornadoGame({ width, height }: Props) {
       const sz = Math.max(0.6, (1 + b * 2.6) * pb * (1.1 - rf * 0.25));
       path.addCircle(cx, cy, sz);
     }
-    return path;
+    return path.detach();
   });
 
   // ---- wind streaks: short tangent speed-lines swept around the funnel surface,
   // selling velocity the way motion lines do ----
   const windStreaks = useDerivedValue(() => {
     world.tick.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
     const n = TUNING.WIND_STREAK_COUNT;
     for (let i = 0; i < n; i++) {
@@ -1363,7 +1363,7 @@ export default function TornadoGame({ width, height }: Props) {
       path.moveTo(cx - tdx * len, cy - tdy * len);
       path.lineTo(cx + tdx * len, cy + tdy * len);
     }
-    return path;
+    return path.detach();
   });
 
   const shadowPath = useDerivedValue(() => {
@@ -1372,9 +1372,9 @@ export default function TornadoGame({ width, height }: Props) {
     const ty = world.tornadoY.value;
     const rx = TUNING.RMAX * 1.0 * pb * vscale;
     const ry = rx * flat; // the ground circle turns with the same camera angle
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     path.addOval(Skia.XYWHRect(bx - rx, ty - ry, rx * 2, ry * 2));
-    return path;
+    return path.detach();
   });
 
   // ---- the face ----
@@ -1405,46 +1405,46 @@ export default function TornadoGame({ width, height }: Props) {
 
   const faceWhites = useDerivedValue(() => {
     const g = faceGeom();
-    const path = Skia.Path.Make();
-    if (world.pop.value > 0.3) return path; // happy "- -" eyes take over on the pop
+    const path = Skia.PathBuilder.Make();
+    if (world.pop.value > 0.3) return path.detach(); // happy "- -" eyes take over on the pop
     const open = eyeOpen();
     const rx = 13 * g.pb * g.vscale;
     const ry = 15 * g.pb * g.vscale * open; // flattens to a slit when straining
     path.addOval(Skia.XYWHRect(g.bx - g.eyeDX - rx, g.faceY - ry, rx * 2, ry * 2));
     path.addOval(Skia.XYWHRect(g.bx + g.eyeDX - rx, g.faceY - ry, rx * 2, ry * 2));
-    return path;
+    return path.detach();
   });
 
   const facePupils = useDerivedValue(() => {
     const g = faceGeom();
-    const path = Skia.Path.Make();
-    if (world.pop.value > 0.3) return path; // no pupils during the happy "- -" eyes
+    const path = Skia.PathBuilder.Make();
+    if (world.pop.value > 0.3) return path.detach(); // no pupils during the happy "- -" eyes
     const open = eyeOpen();
-    if (open < 0.4) return path; // eyes squeezed shut -> no pupils
+    if (open < 0.4) return path.detach(); // eyes squeezed shut -> no pupils
     const r = 6 * g.pb * g.vscale * Math.min(1.15, open);
     const ox = g.look * 5 * g.pb, oy = 3 * g.pb;
     path.addCircle(g.bx - g.eyeDX + ox, g.faceY + oy, r);
     path.addCircle(g.bx + g.eyeDX + ox, g.faceY + oy, r);
-    return path;
+    return path.detach();
   });
 
   // FACE 😄/😲 happy "- -" (slant) eyes: two dashes shown during the celebration pop
   const faceHappyEyes = useDerivedValue(() => {
     const g = faceGeom();
-    const path = Skia.Path.Make();
-    if (world.pop.value <= 0.3) return path;
+    const path = Skia.PathBuilder.Make();
+    if (world.pop.value <= 0.3) return path.detach();
     const halfW = 10 * g.pb * g.vscale;
     path.moveTo(g.bx - g.eyeDX - halfW, g.faceY);
     path.lineTo(g.bx - g.eyeDX + halfW, g.faceY);
     path.moveTo(g.bx + g.eyeDX - halfW, g.faceY);
     path.lineTo(g.bx + g.eyeDX + halfW, g.faceY);
-    return path;
+    return path.detach();
   });
 
   const faceMouth = useDerivedValue(() => {
     const g = faceGeom();
     const s = world.strain.value, o = world.pop.value;
-    const path = Skia.Path.Make();
+    const path = Skia.PathBuilder.Make();
     if (o > 0.25) {
       // FACE 😄/😲 celebration (pairs with the "- -" slant eyes): popVariant picks
       // 😲 open-mouth (dash eyes + O) or 😄 grin (dash eyes + big smile) per pop.
@@ -1458,7 +1458,7 @@ export default function TornadoGame({ width, height }: Props) {
         const mh = (32 + 10 * o) * g.pb * g.vscale;
         path.addArc(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh), 10, 160);
       }
-      return path;
+      return path.detach();
     }
     if (s > 0.4) {
       // FACE 😫 straining (slant/slit-eye effort face): an OPEN mouth that grows
@@ -1467,22 +1467,22 @@ export default function TornadoGame({ width, height }: Props) {
       const mh = (10 + 18 * s) * g.pb * g.vscale;
       const my = g.faceY + 18 * g.pb * g.vscale;
       path.addOval(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh));
-      return path;
+      return path.detach();
     }
     // FACE 🙂 relaxed/cruising: a normal smile arc
     const mw = 34 * g.pb * g.vscale;
     const mh = 30 * g.pb * g.vscale;
     const my = g.faceY + 20 * g.pb * g.vscale;
     path.addArc(Skia.XYWHRect(g.bx - mw / 2, my - mh / 2, mw, mh), 20, 140);
-    return path;
+    return path.detach();
   });
 
   // FACE 😫 furrowed brows: only appear while the tornado is straining
   const faceBrows = useDerivedValue(() => {
     const g = faceGeom();
     const s = world.strain.value;
-    const path = Skia.Path.Make();
-    if (s < 0.15) return path;
+    const path = Skia.PathBuilder.Make();
+    if (s < 0.15) return path.detach();
     const len = 15 * g.pb * g.vscale;
     const drop = 7 * s * g.pb * g.vscale; // inner ends pull DOWN toward the nose
     const by = g.faceY - 15 * g.pb * g.vscale;
@@ -1490,26 +1490,26 @@ export default function TornadoGame({ width, height }: Props) {
     path.lineTo(g.bx - g.eyeDX + len * 0.5, by + drop);
     path.moveTo(g.bx + g.eyeDX + len * 0.5, by - drop * 0.3);
     path.lineTo(g.bx + g.eyeDX - len * 0.5, by + drop);
-    return path;
+    return path.detach();
   });
 
   // ---- deep dark storm cloud across the top (static; the ominous ceiling) ----
   const cloudBack = useMemo(() => {
-    const p = Skia.Path.Make();
+    const p = Skia.PathBuilder.Make();
     const baseY = 92;
     p.addRect(Skia.XYWHRect(0, 0, width, baseY));
     const n = 6, r = 44;
     for (let i = 0; i <= n; i++) p.addCircle((i / n) * width, baseY, r);
-    return p;
+    return p.detach();
   }, [width]);
 
   const cloudFront = useMemo(() => {
-    const p = Skia.Path.Make();
+    const p = Skia.PathBuilder.Make();
     const baseY = 70;
     p.addRect(Skia.XYWHRect(0, 0, width, baseY));
     const n = 7, r = 36;
     for (let i = 0; i <= n; i++) p.addCircle(((i + 0.5) / n) * width, baseY, r);
-    return p;
+    return p.detach();
   }, [width]);
 
   const restart = useCallback(() => {
