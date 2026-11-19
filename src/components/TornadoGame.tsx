@@ -37,7 +37,7 @@ interface Hud {
   running: boolean;
 }
 
-const PROP_W = [34, 58, 52, 32, 0, 44, 84, 64]; // tree, trailer, house, silo, fence, cow, barn, truck. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
+const PROP_W = [34, 104, 90, 32, 0, 44, 84, 64, 118, 70]; // tree, trailer, house, silo, fence, cow, barn, truck, store, watertower. Town entries already include TOWN_SCALE. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
 
 // Rolling hills on the horizon: [baseY, amplitude, k1, k2, parallax], far to
 // near. baseY/amplitude are SCREEN px (these are backdrop, not world props, so
@@ -82,6 +82,100 @@ const drawTruck = (
     path.addCircle(X(-18, 6.5), Y(-18, 6.5), 2.6 * u);
     path.addCircle(X(18, 6.5), Y(18, 6.5), 2.6 * u);
     poly([27.5, 13.5, 31, 13.5, 31, 17, 27.5, 17]);
+  }
+};
+
+// ================= town art =================
+// The four town building types (mobile home, house, general store, water
+// tower). Like drawTruck, ONE function draws each building for both the
+// parked billboard and the tumbling mid-air copy, in local art units (lx
+// across, lh up from the ground), with the same pose convention. Each type
+// is split into flat-color layers; the JSX paints them in the order listed.
+//   trailer:    0 cream body, 1 teal stripe + door, 2 glass, 3 dark skirting/roofline/hitch
+//   house:      0 walls (paint color per instance), 1 roof + chimney, 2 white door/frames, 3 glass
+//   store:      0 brick, 1 cream parapet + awning, 2 red awning stripes, 3 glass, 4 teal sign
+//   watertower: 0 steel legs + braces, 1 tank, 2 slate roof + catwalk, 3 teal band
+const T_TRAILER = STRUCTURE_ORDER.indexOf('trailer');
+const T_HOUSE = STRUCTURE_ORDER.indexOf('house');
+const T_STORE = STRUCTURE_ORDER.indexOf('store');
+const T_TOWER = STRUCTURE_ORDER.indexOf('watertower');
+const TOWN_TYPES = [T_TRAILER, T_HOUSE, T_STORE, T_TOWER];
+const TOWN_HOUSE_COLORS = ['#f3cf72', '#9cc7e6', '#f2a68a']; // butter, sky, salmon
+
+// Mid-height (lh) a tumbling copy spins about, so it rotates around its own
+// middle instead of its base.
+const townMid = (t: number) => {
+  'worklet';
+  return t === T_TRAILER ? 13 : t === T_HOUSE ? 26 : t === T_STORE ? 18 : 46;
+};
+
+const drawTown = (
+  path: PathBuilder, t: number, layer: number,
+  cx: number, cy: number, ca: number, sa: number, u: number, mid: number,
+) => {
+  'worklet';
+  const X = (lx: number, lh: number) => cx + ca * lx * u + sa * (lh - mid) * u;
+  const Y = (lx: number, lh: number) => cy + sa * lx * u - ca * (lh - mid) * u;
+  const poly = (pts: number[]) => {
+    path.moveTo(X(pts[0], pts[1]), Y(pts[0], pts[1]));
+    for (let k = 2; k < pts.length; k += 2) path.lineTo(X(pts[k], pts[k + 1]), Y(pts[k], pts[k + 1]));
+    path.close();
+  };
+  const rect = (x0: number, h0: number, x1: number, h1: number) => poly([x0, h0, x1, h0, x1, h1, x0, h1]);
+  // a straight member of width wd from (xa, ha) to (xb, hb), for tower legs
+  const bar = (xa: number, ha: number, xb: number, hb: number, wd: number) => {
+    const dx = xb - xa, dh = hb - ha;
+    const len = Math.sqrt(dx * dx + dh * dh) || 1;
+    const nx = (-dh / len) * wd * 0.5, nh = (dx / len) * wd * 0.5;
+    poly([xa + nx, ha + nh, xb + nx, hb + nh, xb - nx, hb - nh, xa - nx, ha - nh]);
+  };
+
+  if (t === T_TRAILER) {
+    // 66 long, 24 tall; hitch tongue off the +x end
+    if (layer === 0) rect(-33, 3, 33, 24);
+    else if (layer === 1) { rect(-33, 7, 33, 9.5); rect(9, 3, 16, 19); }
+    else if (layer === 2) { rect(-26, 12, -16, 20); rect(-8, 12, 2, 20); rect(22, 12, 29, 20); }
+    else { rect(-31, 0, 31, 3); rect(-34, 24, 34, 26); poly([33, 3, 40, 1.5, 33, 6]); }
+  } else if (t === T_HOUSE) {
+    // 48 wide walls to 31, gable roof with eaves to 50, chimney to 52
+    if (layer === 0) rect(-24, 0, 24, 31);
+    else if (layer === 1) { rect(12, 38, 18, 52); poly([-29, 28, 0, 50, 29, 28]); }
+    else if (layer === 2) { rect(-5, 0, 5, 17); rect(-20, 12, -9, 24); rect(9, 12, 20, 24); }
+    else {
+      rect(-18.5, 13.5, -10.5, 22.5);
+      rect(10.5, 13.5, 18.5, 22.5);
+      path.addCircle(X(0, 37), Y(0, 37), 3.4 * u);
+    }
+  } else if (t === T_STORE) {
+    // 70 wide brick front to 30, parapet to 37, awning over the windows
+    if (layer === 0) rect(-35, 0, 35, 30);
+    else if (layer === 1) { rect(-37, 30, 37, 37); poly([-31, 25, 31, 25, 34, 18, -34, 18]); }
+    else if (layer === 2) {
+      for (let k = 0; k < 8; k += 2) {
+        const xt0 = -31 + (k * 62) / 8, xt1 = xt0 + 62 / 8;
+        const xb0 = -34 + (k * 68) / 8, xb1 = xb0 + 68 / 8;
+        poly([xt0, 25, xt1, 25, xb1, 18, xb0, 18]);
+      }
+    } else if (layer === 3) { rect(-29, 3, -7, 15.5); rect(7, 3, 29, 15.5); rect(-4.5, 0, 4.5, 15.5); }
+    else rect(-15, 31.5, 15, 35.5);
+  } else if (t === T_TOWER) {
+    // splayed legs to lh 52, bowl-bottomed tank to 78, cone roof to 91
+    if (layer === 0) {
+      bar(-14, 52, -20, 0, 2.6);
+      bar(14, 52, 20, 0, 2.6);
+      bar(-5, 52, -7, 0, 2.2);
+      bar(5, 52, 7, 0, 2.2);
+      // X braces between each outer/inner leg pair, lower and upper bay
+      bar(-19.4, 4, -6.8, 26, 1.3); bar(-6.8, 4, -19.4, 26, 1.3);
+      bar(-17, 26, -6, 48, 1.3); bar(-6, 26, -17, 48, 1.3);
+      bar(19.4, 4, 6.8, 26, 1.3); bar(6.8, 4, 19.4, 26, 1.3);
+      bar(17, 26, 6, 48, 1.3); bar(6, 26, 17, 48, 1.3);
+    } else if (layer === 1) poly([-19, 56, -13, 51, 0, 49, 13, 51, 19, 56, 19, 78, -19, 78]);
+    else if (layer === 2) {
+      poly([-21, 78, 0, 91, 21, 78]);
+      rect(-22, 53.5, 22, 55.5);
+      path.addCircle(X(0, 92.5), Y(0, 92.5), 2.2 * u);
+    } else rect(-19, 63, 19, 69);
   }
 };
 
@@ -154,6 +248,7 @@ export default function TornadoGame({ width, height }: Props) {
   const hapticCd = useSharedValue(0);
   const lastEF = useSharedValue(-1);
   const pendingEF = useSharedValue(0);
+  const prevQuake = useSharedValue(0);
   const buzz = useCallback((k: number) => {
     const style =
       k === 0 ? Haptics.ImpactFeedbackStyle.Soft
@@ -206,20 +301,26 @@ export default function TornadoGame({ width, height }: Props) {
     if (ef > lastEF.value) pendingEF.value = 1;
     lastEF.value = ef; // also follows a restart back down to -1
     hapticCd.value -= dt;
+    // the quake's SECOND kick gets its own heavy hit, fired the frame its
+    // countdown crosses the kick, cooldown or not (it's the payoff beat)
+    const kick2At = TUNING.QUAKE_SECS - TUNING.QUAKE_KICK2;
+    if (prevQuake.value > kick2At && world.quake.value <= kick2At && world.quake.value > 0) {
+      runOnJS(buzz)(3);
+      hapticCd.value = TUNING.HAPTIC_GAP;
+    }
+    prevQuake.value = world.quake.value;
     if (hapticCd.value <= 0) {
       const thud = world.thud.value;
       if (thud > 0) {
         world.thud.value = 0;
         runOnJS(buzz)(thud);
         hapticCd.value = TUNING.HAPTIC_GAP;
-      } else if (pendingEF.value === 1) {
+      } else if (pendingEF.value === 1 && world.quake.value <= 0) {
+        // held back during a quake so it lands after the double jolt
         pendingEF.value = 0;
         runOnJS(buzzEF)();
         hapticCd.value = 0.15;
-      } else if (world.quake.value > 0) {
-        runOnJS(buzz)(world.quake.value > TUNING.QUAKE_SECS * 0.5 ? 3 : 2);
-        hapticCd.value = TUNING.QUAKE_RUMBLE_GAP;
-      } else if (world.strain.value > 0.3) {
+      } else if (world.strain.value > 0.3 && world.quake.value <= 0) {
         runOnJS(buzz)(0);
         hapticCd.value = TUNING.STRAIN_RUMBLE_GAP / world.strain.value;
       }
@@ -416,7 +517,9 @@ export default function TornadoGame({ width, height }: Props) {
       for (let i = 0; i < alive.length; i++) {
         if (alive[i] === 0 || kind[i] !== 0) continue;
         const t = dtype[i];
-        const farm = t === BARN_TYPE || t === SILO_TYPE || t === TRUCK_TYPE;
+        const farm =
+          t === BARN_TYPE || t === SILO_TYPE || t === TRUCK_TYPE ||
+          t === T_TRAILER || t === T_HOUSE || t === T_STORE || t === T_TOWER;
         if (only < 0 ? farm : t !== only) continue;
         const h = dh[i] < 0 ? 0 : dh[i] > 1 ? 1 : dh[i];
         // ride the SAME cone the body is drawn from, so debris hugs the funnel's
@@ -448,6 +551,7 @@ export default function TornadoGame({ width, height }: Props) {
   const barnChunks = useChunkPath(BARN_TYPE);
   const siloChunks = useChunkPath(SILO_TYPE);
   const truckChunks = useChunkPath(TRUCK_TYPE);
+  const townChunks = TOWN_TYPES.map((t) => useChunkPath(t));
 
   // uprootedTrees: the DEFAULT whole-entity render — a trunk quad + canopy
   // blob, tumbling by its own self-spin. Used for every uprooted structure
@@ -466,6 +570,7 @@ export default function TornadoGame({ width, height }: Props) {
       if (alive[i] === 0 || kind[i] !== 1) continue;
       const dt0 = dtype[i];
       if (dt0 === FENCE_TYPE || dt0 === COW_TYPE || dt0 === BARN_TYPE || dt0 === SILO_TYPE || dt0 === TRUCK_TYPE) continue;
+      if (dt0 === T_TRAILER || dt0 === T_HOUSE || dt0 === T_STORE || dt0 === T_TOWER) continue;
       const h = dh[i] < 0 ? 0 : dh[i];
       const [ccx, ccy, crr] = coneAt(h, bx, pb, baseY, swayX, vscale, s);
       const rr = crr * rf[i];
@@ -732,12 +837,106 @@ export default function TornadoGame({ width, height }: Props) {
   const quakeTransform = useDerivedValue(() => {
     const q = world.quake.value;
     if (q <= 0) return [{ translateX: 0 }, { translateY: 0 }];
-    const a = (q / TUNING.QUAKE_SECS) * TUNING.QUAKE_PX;
-    const t = world.tick.value;
-    return [{ translateX: Math.sin(t * 2.1) * a }, { translateY: Math.cos(t * 2.9) * a * 0.6 }];
+    // Two kicks KICK2 apart. Each is a downward thump that springs back: a
+    // damped cosine, so it hits at full strength on its first frame and has
+    // settled within ~0.2s. The second is a little weaker so it reads as an
+    // echo of the first rather than a repeat.
+    const e = TUNING.QUAKE_SECS - q; // seconds since the structure went
+    const kick = (tk: number, amp: number) => (tk < 0 ? 0 : amp * Math.exp(-tk * 16) * Math.cos(tk * 42));
+    const k2 = e - TUNING.QUAKE_KICK2;
+    const y = kick(e, TUNING.QUAKE_PX) + kick(k2, TUNING.QUAKE_PX * 0.75);
+    const x = 0.3 * (kick(e - 0.012, TUNING.QUAKE_PX) - kick(k2 - 0.012, TUNING.QUAKE_PX * 0.75));
+    return [{ translateX: x }, { translateY: y }];
   });
 
   // ---- cute prop billboards ----
+// ================= town =================
+  // Parked buildings, one path per (row, type, layer[, paint variant]).
+  // `row` 0 = the back row (base above the town centre), 1 = the front row:
+  // the JSX paints every layer of the back row before any of the front row,
+  // so a front building's roof correctly covers the back row behind it
+  // (per-type layers alone can't do that, they'd interleave the rows).
+  // `variant` only matters for house walls: instance slot % 3 picks the
+  // paint color, so neighbours differ. -1 = every instance (ink outlines).
+  const useTownGround = (t: number, layer: number, variant: number, row: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const sx = world.sx.value, sy = world.sy.value;
+      const stype = world.stype.value, salive = world.salive.value;
+      const shp = world.shp.value, shpMax = world.shpMax.value;
+      const ty = world.townY.value;
+      for (let i = 0; i < salive.length; i++) {
+        if (salive[i] === 0 || stype[i] !== t) continue;
+        if (variant >= 0 && i % 3 !== variant) continue;
+        if ((sy[i] < ty ? 0 : 1) !== row) continue;
+        const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+        const [bx, p] = project(sx[i], sy[i]);
+        const sc = p * (0.72 + 0.28 * Math.max(dmg, 0)) * TUNING.TOWN_SCALE;
+        drawTown(path, t, layer, bx, sy[i], 1, 0, sc, 0);
+      }
+      return path.detach();
+    });
+
+  // The same buildings tumbling through the funnel. A debris slot doesn't
+  // know which instance it came from, so a flying house's paint is picked
+  // by slot % 3: still a mix of colors in the air.
+  const useTownAir = (t: number, layer: number, variant: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const f = funnelFrame();
+      const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
+      const mid = townMid(t);
+      for (let i = 0; i < alive.length; i++) {
+        if (alive[i] === 0 || kind[i] !== 1 || dtype[i] !== t) continue;
+        if (variant >= 0 && i % 3 !== variant) continue;
+        const [cx, cy, ca, sa, u] = uprootPose(i, f);
+        drawTown(path, t, layer, cx, cy, ca, sa, u, mid);
+      }
+      return path.detach();
+    });
+
+  // Hooks are created in a fixed order every render (fixed-length maps).
+  const LAYERS_OF = [4, 4, 5, 4]; // trailer, house, store, water tower
+  const townGround = [0, 1].map((row) =>
+    TOWN_TYPES.map((t, k) => Array.from({ length: LAYERS_OF[k] }, (_, l) => useTownGround(t, l, -1, row))),
+  );
+  const townAir = TOWN_TYPES.map((t, k) =>
+    Array.from({ length: LAYERS_OF[k] }, (_, l) => useTownAir(t, l, -1)),
+  );
+  const houseWallsGround = [0, 1].map((row) => TOWN_HOUSE_COLORS.map((_, v) => useTownGround(T_HOUSE, 0, v, row)));
+  const houseWallsAir = TOWN_HOUSE_COLORS.map((_, v) => useTownAir(T_HOUSE, 0, v));
+
+  // Streets: a main street in front of each row of lots (front row at dy 40,
+  // back row at dy -30, see TOWN_LOTS in state.ts), spanning the whole town.
+  // Drawn as ground decals under every prop. layer 0 = sidewalk (on the far
+  // side of each street, where the lots front onto it), 1 = asphalt, 2 =
+  // the dashed center line.
+  const useTownStreets = (layer: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const tx = world.townX.value, ty = world.townY.value;
+      if (!(tx === tx)) return path.detach(); // NaN: no town this run
+      const x0 = tx - 250, x1 = tx + 250;
+      // [centre dy, half thickness] per street
+      const streets = [[58, 8], [-17, 6.5]];
+      for (let k = 0; k < streets.length; k++) {
+        const yc = ty + streets[k][0], hw = streets[k][1];
+        const band = (ya: number, yb: number, xa: number, xb: number) => {
+          const [pa] = project(xa, ya), [pb] = project(xb, ya);
+          const [pc] = project(xb, yb), [pd] = project(xa, yb);
+          path.moveTo(pa, ya); path.lineTo(pb, ya); path.lineTo(pc, yb); path.lineTo(pd, yb); path.close();
+        };
+        if (layer === 0) band(yc - hw - 3.5, yc - hw, x0, x1);
+        else if (layer === 1) band(yc - hw, yc + hw, x0, x1);
+        else for (let x = x0 + 8; x < x1 - 10; x += 24) band(yc - 0.7, yc + 0.7, x, x + 11);
+      }
+      return path.detach();
+    });
+  const townStreets = [useTownStreets(0), useTownStreets(1), useTownStreets(2)];
+
   const COW_LEG_X = [30, 23, 8, 1]; // rear pair, then front pair (the cow faces LEFT)
 
   const useStructurePath = (typeIndex: number) =>
@@ -805,22 +1004,6 @@ export default function TornadoGame({ width, height }: Props) {
           // stays welded to the trunk top however far the tree bends
           const canL = trunk + R * 0.7;
           path.addCircle(bx + sB * canL * ux, by - cB * canL + sB * canL * uy, R);
-        } else if (typeIndex === 1) {
-          // mobile home: a low box with a shallow roof cap. Uses addRect, NOT the
-          // deprecated addRRect (which warns / no-ops in react-native-skia 2.x).
-          const w = 58 * sc, h = 26 * sc;
-          path.addRect(Skia.XYWHRect(bx - w / 2, by - h, w, h));
-          path.moveTo(bx - w / 2 - 2 * sc, by - h);
-          path.lineTo(bx, by - h - 10 * sc);
-          path.lineTo(bx + w / 2 + 2 * sc, by - h);
-          path.close();
-        } else if (typeIndex === 2) {
-          const w = 52 * sc, bh = 34 * sc, rh = 24 * sc;
-          path.addRect(Skia.XYWHRect(bx - w / 2, by - bh, w, bh));
-          path.moveTo(bx - w / 2 - 3 * sc, by - bh);
-          path.lineTo(bx, by - bh - rh);
-          path.lineTo(bx + w / 2 + 3 * sc, by - bh);
-          path.close();
         } else if (typeIndex === SILO_TYPE) {
           // grain silo BODY only — the concrete cylinder. Its stave bands and
           // shaded side (siloShade) and its galvanized dome (farmRoofs) are
@@ -978,6 +1161,8 @@ export default function TornadoGame({ width, height }: Props) {
     useStructurePath(5),
     useStructurePath(6),
     useStructurePath(7),
+    useStructurePath(8), // store and water tower: empty, drawn by the town layers
+    useStructurePath(9),
   ];
 
   // Pasture fence posts: a SEPARATE, darker layer drawn under the fence's
@@ -1805,6 +1990,9 @@ export default function TornadoGame({ width, height }: Props) {
             />
           </Path>
 
+          <Path path={townStreets[0]} color="#ddd5c2" />
+          <Path path={townStreets[1]} color="#8f8b84" />
+          <Path path={townStreets[2]} color="#f2e2a0" />
           <Path path={propShadows} color="#7a6a49" opacity={0.22} />
           <Path path={fencePosts} color="#5e3320" />
           {STRUCTURE_ORDER.map((key, i) => (
@@ -1854,6 +2042,42 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={truckGlass} color="#33291f" style="stroke" strokeWidth={1.1} strokeJoin="round" />
           <Path path={truckTires} color="#2b2320" />
           <Path path={truckHubs} color="#e9eef2" />
+
+          {/* the town, back to front within each building: see drawTown for
+              the layer list. Bodies get the same ink outline as the farm. */}
+          {[0, 1].map((r) => (
+            <Group key={`town-row-${r}`}>
+            <Path path={townGround[r][3][0]} color="#6b7883" />
+            <Path path={townGround[r][3][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={0.8} />
+            <Path path={townGround[r][3][1]} color="#d5dde2" />
+            <Path path={townGround[r][3][1]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.3} />
+            <Path path={townGround[r][3][3]} color="#3f8f9a" />
+            <Path path={townGround[r][3][2]} color="#5b6875" />
+            <Path path={townGround[r][3][2]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.1} />
+            <Path path={townGround[r][2][0]} color="#b5543c" />
+            <Path path={townGround[r][2][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.3} />
+            <Path path={townGround[r][2][3]} color="#bfe3f0" />
+            <Path path={townGround[r][2][3]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1} />
+            <Path path={townGround[r][2][1]} color="#f7f1e3" />
+            <Path path={townGround[r][2][2]} color="#e05a4f" />
+            <Path path={townGround[r][2][1]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.1} />
+            <Path path={townGround[r][2][4]} color="#2f6f7a" />
+            <Path path={houseWallsGround[r][0]} color={TOWN_HOUSE_COLORS[0]} />
+            <Path path={houseWallsGround[r][1]} color={TOWN_HOUSE_COLORS[1]} />
+            <Path path={houseWallsGround[r][2]} color={TOWN_HOUSE_COLORS[2]} />
+            <Path path={townGround[r][1][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.3} />
+            <Path path={townGround[r][1][1]} color="#7a4f43" />
+            <Path path={townGround[r][1][1]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.3} />
+            <Path path={townGround[r][1][2]} color="#f7f1e3" />
+            <Path path={townGround[r][1][2]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1} />
+            <Path path={townGround[r][1][3]} color="#bfe3f0" />
+            <Path path={townGround[r][0][0]} color="#ece4cf" />
+            <Path path={townGround[r][0][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.3} />
+            <Path path={townGround[r][0][1]} color="#4f9aa8" />
+            <Path path={townGround[r][0][2]} color="#bfe3f0" />
+            <Path path={townGround[r][0][3]} color="#4a5560" />
+            </Group>
+          ))}
 
           {/* storm cloud drawn OVER the props so far ones tuck behind the horizon */}
           <Path path={cloudBack} color="#1e2a35" />
@@ -1907,6 +2131,34 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={uprootedTrucks[1]} color="#bfe3f0" />
           <Path path={uprootedTrucks[2]} color="#2b2320" />
           <Path path={uprootedTrucks[3]} color="#e9eef2" />
+          {/* ripped-up town buildings + their tinted debris */}
+          <Path path={townChunks[0]} color="#ece4cf" />
+          <Path path={townChunks[1]} color="#e8d9b8" />
+          <Path path={townChunks[2]} color="#b5543c" />
+          <Path path={townChunks[3]} color="#c3ccd2" />
+          <Path path={townAir[3][0]} color="#6b7883" />
+          <Path path={townAir[3][1]} color="#d5dde2" />
+          <Path path={townAir[3][1]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.2} />
+          <Path path={townAir[3][3]} color="#3f8f9a" />
+          <Path path={townAir[3][2]} color="#5b6875" />
+          <Path path={townAir[2][0]} color="#b5543c" />
+          <Path path={townAir[2][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.2} />
+          <Path path={townAir[2][3]} color="#bfe3f0" />
+          <Path path={townAir[2][1]} color="#f7f1e3" />
+          <Path path={townAir[2][2]} color="#e05a4f" />
+          <Path path={houseWallsAir[0]} color={TOWN_HOUSE_COLORS[0]} />
+          <Path path={houseWallsAir[1]} color={TOWN_HOUSE_COLORS[1]} />
+          <Path path={houseWallsAir[2]} color={TOWN_HOUSE_COLORS[2]} />
+          <Path path={townAir[1][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.2} />
+          <Path path={townAir[1][1]} color="#7a4f43" />
+          <Path path={townAir[1][1]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.2} />
+          <Path path={townAir[1][2]} color="#f7f1e3" />
+          <Path path={townAir[1][3]} color="#bfe3f0" />
+          <Path path={townAir[0][0]} color="#ece4cf" />
+          <Path path={townAir[0][0]} color="#33291f" style="stroke" strokeJoin="round" strokeWidth={1.2} />
+          <Path path={townAir[0][1]} color="#4f9aa8" />
+          <Path path={townAir[0][2]} color="#bfe3f0" />
+          <Path path={townAir[0][3]} color="#4a5560" />
           </Group>
         </Canvas>
       </GestureDetector>

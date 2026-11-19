@@ -11,7 +11,7 @@
  * are individual shared values so Skia can react to them via useDerivedValue.
  */
 import { makeMutable, type SharedValue } from 'react-native-reanimated';
-import { STRUCTURES, STRUCTURE_ORDER, TUNING } from './model';
+import { STRUCTURES, STRUCTURE_ORDER, TUNING, type StructureKey } from './model';
 
 export interface WorldState {
   // --- debris & uprooted structures (struct-of-arrays, capacity = MAX_DEBRIS) ---
@@ -63,6 +63,8 @@ export interface WorldState {
   pop: SharedValue<number>; // 0..1 "big O" celebration pulse right after an uproot
   introShake: SharedValue<number>; // seconds left on the one-time first-tree face shake
   quake: SharedValue<number>; // seconds left on the scene shake after a big structure is ripped up
+  townX: SharedValue<number>; // world centre of the town (street layout anchor); NaN if it failed to place
+  townY: SharedValue<number>;
   thud: SharedValue<number>; // haptic weight of this frame's heaviest uproot: 0 none, 1 light, 2 medium, 3 big (read + cleared by the frame callback)
   introUsed: SharedValue<number>; // 1 once the intro shake has been triggered this run
   popVariant: SharedValue<number>; // celebration mouth: 0 = grin, 1 = open mouth (chosen per pop)
@@ -87,7 +89,7 @@ function makeRng(seed: number) {
  */
 export function createWorld(width: number, height: number): WorldState {
   const N = TUNING.MAX_DEBRIS;
-  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) + barn + silo + truck = 127, with headroom)
+  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) + barn + silo + truck + 8 town buildings = 135, with headroom)
   const f32 = (n: number) => makeMutable<Float32Array>(new Float32Array(n));
 
   const w: WorldState = {
@@ -115,6 +117,8 @@ export function createWorld(width: number, height: number): WorldState {
     introShake: makeMutable(0),
     quake: makeMutable(0),
     thud: makeMutable(0),
+    townX: makeMutable(NaN),
+    townY: makeMutable(NaN),
     introUsed: makeMutable(0),
     popVariant: makeMutable(0),
 
@@ -176,7 +180,8 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   w.popVariant.value = 0;
 
   // Field composition: a grove of trees + two pastures + one farmstead
-  // (pickup truck EF1 + barn EF2 + silo EF3). Trailers and houses are still parked.
+  // (pickup truck EF1 + barn EF2 + silo EF3) + a small town beside the other
+  // pasture (mobile homes EF1, houses EF2, general store EF3, water tower EF4). Trailers and houses are still parked.
   const plan: string[] = [
     // EF0 phase: a grove of trees. Fences and cows are NOT listed here —
     // they're correlated groups (4 sides + a herd of 8 sharing one corral
@@ -339,6 +344,97 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
     }
   }
 
+  // ================= TOWN =================
+  // A small edge-of-town sprawl beside one pasture, with the farmstead
+  // beside the other, so the field reads as farm -> pasture -> pasture -> town. Two
+  // rows of lots with a street in front of each. The town "sprawls" toward
+  // the cows: mobile homes on the pasture end, houses in the middle, and the
+  // general store and water tower (EF3, EF4) on the far end.
+  //
+  // Lots are [type, dx, dy] about the town centre, with dx measured TOWARD
+  // the pasture (flipped by `toward` below). The art is drawn TOWN_SCALE (1.6x)
+  // bigger than its local units so the buildings read at barn scale next to
+  // the hero-sized cows, and these offsets are in the same scaled world
+  // units. Scaled extents: mobile home -53..+64 (the hitch is always on +x,
+  // so when the town is mirrored it sticks out the OTHER way: mobile-home
+  // gaps are spaced for +-64), house +-46 (eaves), store +-59, water tower
+  // +-35. Gaps in a row are 8+ units. The front row's roofs DO reach up over the
+  // back row's bases on screen; that's fine because TornadoGame.tsx draws the
+  // whole back row before the front row.
+  const TOWN_LOTS: [StructureKey, number, number][] = [
+    // back row (further from the camera), base at dy -30
+    ['watertower', -200, -30], ['store', -100, -30], ['house', 14, -30], ['house', 116, -30],
+    // front row, base at dy 44
+    ['house', -170, 44], ['house', -70, 44], ['trailer', 48, 44], ['trailer', 185, 44],
+  ];
+  // Ground footprint box: lots span dx -235..249 plus the street ends; dy -40
+  // (behind the back-row bases) to +70 (the front street's near edge).
+  const townHalfW = 252;
+  const townHalfH = 55;
+  const townBoxOff = 15; // box centre, below the town centre
+  const townGap = 25; // clearance between a corral's rail and the town box
+
+  const boxesClear = (
+    ax: number, ay: number, ahw: number, ahh: number,
+    bx: number, by: number, bhw: number, bhh: number, gap: number,
+  ) => Math.abs(ax - bx) > ahw + bhw + gap || Math.abs(ay - by) > ahh + bhh + gap;
+
+  const townFits = (cx: number, cy: number) => {
+    const by = cy + townBoxOff;
+    if (cx - townHalfW < margin || cx + townHalfW > w.width - margin) return false;
+    for (let k = 0; k < corralCx.length; k++) {
+      if (!boxesClear(cx, by, townHalfW, townHalfH, corralCx[k], corralCy[k], fenceHalf, fenceHalf, 20)) return false;
+    }
+    // tornado start: tighter than the corrals' 90+ because the town is wide
+    // (~500 units) and the narrowest phones' worlds barely fit it; 55 still
+    // keeps every building out of the funnel's core (RMAX 58) at the start.
+    return boxesClear(cx, by, townHalfW, townHalfH, w.width / 2, w.height / 2, 0, 0, 55);
+  };
+  // Back-row bases must sit below the HUD band (topMargin), and the front
+  // street on the field: that pins the centre's y range. Inside it, follow
+  // the pasture's own y so the town lines up beside it.
+  const townMinY = topMargin + 30 + 10;
+  const townMaxY = w.height - botMargin - 44 - 3; // -3: room for the lots' y jitter
+  const clampTownY = (y: number) => Math.min(townMaxY, Math.max(townMinY, y));
+
+  // The town is placed BEFORE the farmstead: it's ~500 units wide and on the
+  // narrowest phones only some sides of some corrals can hold it, while the
+  // farm is small and can sit on any of a corral's four sides. Placing the
+  // farm first left the town homeless on ~9% of narrow-phone layouts; this
+  // way round the farm takes the OTHER corral (or works around the town).
+  let townCx = 0, townCy = 0, toward = 1, townPlaced = false, townCorral = -1;
+  const firstCorral = Math.floor(rng() * CORRALS) % CORRALS;
+  for (let c = 0; c < CORRALS && !townPlaced; c++) {
+    const k = (firstCorral + c) % CORRALS;
+    const firstSide = rng() < 0.5 ? -1 : 1;
+    for (let sd = 0; sd < 2 && !townPlaced; sd++) {
+      const side = sd === 0 ? firstSide : -firstSide;
+      const cx = corralCx[k] + side * (fenceHalf + townGap + townHalfW);
+      const cy = clampTownY(corralCy[k]);
+      if (townFits(cx, cy)) {
+        townCx = cx; townCy = cy; toward = -side; townPlaced = true; townCorral = k;
+      }
+    }
+  }
+  if (!townPlaced) {
+    // Nowhere beside a pasture. Scan the whole field on a grid (not random
+    // tries: a fit can be a narrow slot, and random sampling missed real
+    // ones). The town still faces its sprawl toward the nearest corral. On
+    // the narrowest phones a few layouts have no slot at all (~1 in 150 in
+    // the layout probe); that run just has no town.
+    for (let cx = margin + townHalfW; cx <= w.width - margin - townHalfW && !townPlaced; cx += 8) {
+      for (let cy = townMinY; cy <= townMaxY && !townPlaced; cy += 16) {
+      if (townFits(cx, cy)) {
+        townCx = cx; townCy = cy; townPlaced = true;
+        let best = 0;
+        for (let k = 1; k < corralCx.length; k++) {
+          if (Math.abs(corralCx[k] - cx) < Math.abs(corralCx[best] - cx)) best = k;
+        }
+        toward = corralCx[best] >= cx ? 1 : -1;
+      }
+      }
+    }
+  }
   // ================= FARMSTEAD =================
   // A barn and a grain silo standing side by side just outside ONE of the
   // corrals, so the pasture, the herd and the farm buildings read as one
@@ -376,8 +472,9 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   // the farm lands on varies by seed), and take the first that fits on the
   // field. Every candidate clears the corral by construction — farmGap is the
   // gap between the rail and the farm's own edge — so the only things left to
-  // test are the world bounds, the OTHER corral, and the tornado's start.
-  const farmCorral = Math.floor(rng() * CORRALS) % CORRALS;
+  // test are the world bounds, the OTHER corral, the town, and the tornado's start.
+  // the pasture the town isn't beside (random when the town had to go elsewhere)
+  const farmCorral = townCorral >= 0 ? (townCorral + 1) % CORRALS : Math.floor(rng() * CORRALS) % CORRALS;
   const fcx = corralCx[farmCorral], fcy = corralCy[farmCorral];
   const sideOff = fenceHalf + farmGap;
   const sides: [number, number][] = [
@@ -398,6 +495,8 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
       const oky = Math.abs(y - corralCy[k]) > fenceHalf + farmHalfH + 20;
       if (!okx && !oky) return false;
     }
+    // clear of the town (placed first)
+    if (townPlaced && !boxesClear(x, y, farmHalfW, farmHalfH, townCx, townCy + townBoxOff, townHalfW, townHalfH, 40)) return false;
     // clear of the tornado's start, same box test the corrals use
     const okTx = Math.abs(x - w.width / 2) > farmHalfW + 90;
     const okTy = Math.abs(y - w.height / 2) > farmHalfH + 90;
@@ -447,6 +546,29 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
     slot++;
   }
 
+  // town buildings (placed above, before the farm; see the TOWN block)
+  if (townPlaced) {
+    for (let k = 0; k < TOWN_LOTS.length; k++) {
+      const [key, dx, dy] = TOWN_LOTS[k];
+      const t = STRUCTURES[key];
+      sx[slot] = townCx + toward * dx;
+      sy[slot] = townCy + dy + (rng() - 0.5) * 4;
+      shp[slot] = t.hp;
+      shpMax[slot] = t.hp;
+      sbreak[slot] = t.breakWind;
+      sef[slot] = t.ef;
+      sw[slot] = t.w;
+      sh[slot] = t.h;
+      stype[slot] = STRUCTURE_ORDER.indexOf(key);
+      schunks[slot] = t.chunks;
+      schunkMass[slot] = t.chunkMass;
+      salive[slot] = 1;
+      slot++;
+    }
+  }
+  w.townX.value = townPlaced ? townCx : NaN;
+  w.townY.value = townPlaced ? townCy : NaN;
+
   // Clearance so a generic prop (tree, ...) doesn't spawn overlapping a
   // corral's footprint: fenceHalf (the corral's own half-side) plus a margin
   // for a tree's own visual radius/lean, checked as a square keep-out box
@@ -480,7 +602,15 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
       // sized to the barn+silo box rather than a corral.
       const okFarm =
         Math.abs(x - farmCx) > farmHalfW + 30 || Math.abs(y - farmCy) > farmHalfH + 30;
-      ok = okTornado && okFence && okFarm;
+      // ...and off the town. Extra room on the NEAR side (larger y): a tree in
+      // front of the town is drawn before the town layers, so its canopy
+      // would end up painted under the buildings it should be in front of.
+      const okTown =
+        !townPlaced ||
+        Math.abs(x - townCx) > townHalfW + 30 ||
+        y < townCy + townBoxOff - townHalfH - 30 ||
+        y > townCy + townBoxOff + townHalfH + 75;
+      ok = okTornado && okFence && okFarm && okTown;
     }
     sx[i] = x;
     sy[i] = y;

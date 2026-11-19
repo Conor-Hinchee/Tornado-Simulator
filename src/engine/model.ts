@@ -42,12 +42,18 @@ export const STRUCTURES: Record<string, StructureType> = {
     w: 26, h: 46, chunks: 5, chunkMass: 0.45, color: '#5cc25f',
   },
   trailer: {
+    // Mobile home in the town's trailer park, on the side of town nearest the
+    // pasture (see the TOWN block in state.ts). Drawn by drawTown in
+    // TornadoGame.tsx: cream siding, teal stripe, skirting and a hitch.
     key: 'trailer', label: 'Mobile home', breakWind: 86, ef: 1, hp: 95,
-    w: 66, h: 38, chunks: 8, chunkMass: 0.8, color: '#f3cf72',
+    w: 66, h: 26, chunks: 8, chunkMass: 0.8, color: '#ece4cf',
   },
   house: {
+    // Frame house on the town's streets. Walls come in three paint colors,
+    // picked per instance (TOWN_HOUSE_COLORS in TornadoGame.tsx); `color` is
+    // the debris tint.
     key: 'house', label: 'House', breakWind: 112, ef: 2, hp: 170,
-    w: 82, h: 66, chunks: 12, chunkMass: 1.3, color: '#ff8f5e',
+    w: 58, h: 52, chunks: 12, chunkMass: 1.3, color: '#e8d9b8',
   },
   silo: {
     // Grain silo, standing beside the barn at the farmstead (see the FARMSTEAD
@@ -110,9 +116,22 @@ export const STRUCTURES: Record<string, StructureType> = {
     key: 'truck', label: 'Pickup truck', breakWind: 100, ef: 1, hp: 110,
     w: 62, h: 34, chunks: 7, chunkMass: 0.9, color: '#3f7fbf',
   },
+  store: {
+    // The town's general store: a brick shopfront with a striped awning, at
+    // the far end of main street. EF3, the town's answer to the silo.
+    key: 'store', label: 'General store', breakWind: 150, ef: 3, hp: 200,
+    w: 74, h: 37, chunks: 12, chunkMass: 1.2, color: '#b5543c',
+  },
+  watertower: {
+    // The town water tower, at the end of town furthest from the pasture.
+    // The first EF4 structure in the game: 175 mph to touch it, so it's the
+    // late-run goal once the farm and the store are gone.
+    key: 'watertower', label: 'Water tower', breakWind: 175, ef: 4, hp: 220,
+    w: 44, h: 93, chunks: 12, chunkMass: 1.3, color: '#d5dde2',
+  },
 };
 
-export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow', 'barn', 'truck'] as const;
+export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow', 'barn', 'truck', 'store', 'watertower'] as const;
 export type StructureKey = (typeof STRUCTURE_ORDER)[number];
 
 export const EF_LABELS = ['EF0', 'EF1', 'EF2', 'EF3', 'EF4', 'EF5'];
@@ -175,7 +194,7 @@ export const TUNING = {
 
   // --- lift capacity ---
   // How many WHOLE structures of EACH TYPE the funnel can carry at once.
-  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn, truck);
+  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn, truck, store, watertower);
   // 0 means that type is NOT capped.
   //
   // Why per-type and not one shared pool: a shared pool was the first cut,
@@ -196,7 +215,7 @@ export const TUNING = {
   //
   // Uncapped types are still bounded by MAX_DEBRIS; that path now holds at
   // the brink too rather than silently destroying the structure.
-  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0, 2, 0],
+  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0, 2, 0, 0, 0],
 
   // Extra simultaneous lifts granted per EF level, added to a capped type's
   // base above. Now live: flattening the barn (EF2) or silo (EF3) raises
@@ -300,30 +319,44 @@ export const TUNING = {
   // same as LIFT_CAP_BY_TYPE. A barn lifting off should NOT read like a tree:
   // it's drawn bigger, tumbles slower (it's heavy), and hangs in the funnel
   // whole for longer before it comes apart, which is the payoff moment.
-  UPROOT_SIZE_BY_TYPE: [22, 30, 34, 30, 22, 22, 38, 34], // render size (px) of the whole entity
-  UPROOT_TUMBLE_BY_TYPE: [7.0, 5.0, 4.0, 3.2, 7.0, 7.0, 2.6, 4.2], // self-rotation (rad/s)
-  UPROOT_TIME_BY_TYPE: [0.8, 1.0, 1.2, 1.5, 0.8, 0.8, 1.6, 1.2], // seconds aloft whole before the burst
+  UPROOT_SIZE_BY_TYPE: [22, 40, 44, 30, 22, 22, 38, 34, 48, 50], // render size (px) of the whole entity
+  UPROOT_TUMBLE_BY_TYPE: [7.0, 5.0, 4.0, 3.2, 7.0, 7.0, 2.6, 4.2, 2.4, 2.0], // self-rotation (rad/s)
+  UPROOT_TIME_BY_TYPE: [0.8, 1.0, 1.2, 1.5, 0.8, 0.8, 1.6, 1.2, 1.6, 1.8], // seconds aloft whole before the burst
 
   // --- big-structure impact ---
   // A structure whose breakWind is at or above this counts as BIG (barn,
-  // silo, house): wrestling one shows the strain face at ANY Vmax (normally it
-  // only shows below STRAIN_VMAX_MAX), and ripping one up always pops the
-  // "big O" and shakes the whole scene.
-  BIG_BREAK: 110,
-  QUAKE_SECS: 0.55, // how long the scene shakes when a big structure goes
-  QUAKE_PX: 9, // peak shake amplitude (screen px)
+  // silo, general store, water tower): wrestling one shows the strain face at
+  // ANY Vmax (normally it only shows below STRAIN_VMAX_MAX), and ripping one
+  // up always pops the "big O" and shakes the whole scene. 118 keeps houses
+  // (112) out: a street of them would shake constantly, so they get a
+  // medium haptic knock instead.
+  BIG_BREAK: 118,
+  // The shake is a DOUBLE JOLT, not a rumble: two hard kicks (a downward
+  // thump that springs back) QUAKE_KICK2 seconds apart, each with a heavy
+  // haptic hit. Two clean beats read as weight and reward; a long rumble
+  // read as noise. quakeTransform in TornadoGame.tsx draws it.
+  QUAKE_SECS: 0.6, // window covering both kicks and their spring-back
+  QUAKE_KICK2: 0.2, // seconds from the first kick to the second
+  QUAKE_PX: 13, // first kick's peak displacement (screen px); the second is 0.75x
+
+  // --- town scale ---
+  // The town's art (drawTown in TornadoGame.tsx) is authored in small local
+  // units; it's drawn this much bigger on the ground so a house reads at
+  // barn scale next to the hero-sized cows (a cow is 61 units nose to tail).
+  // state.ts's TOWN_LOTS spacing is in these scaled units. Mid-air copies are
+  // sized by UPROOT_SIZE_BY_TYPE instead.
+  TOWN_SCALE: 1.6,
 
   // --- haptics (see the frame callback in TornadoGame.tsx) ---
   // Each uproot raises a "thud" weight by the structure's breakWind: below
   // THUD_MEDIUM it's a light tap (cows, fences, trees), up to BIG_BREAK a
-  // medium knock (the truck), and big structures a heavy hit followed by a
-  // rumble of heavy taps for as long as the scene quakes. Wrestling a
+  // medium knock (mobile homes, the truck, houses), and big structures a
+  // heavy hit on each of the quake's two kicks. Wrestling a
   // stubborn structure (the strain face) gives a soft rumble whose rate
   // rises with the strain. HAPTIC_GAP is the minimum time between any two
   // taps, so a grove vanishing at once doesn't turn into a buzz.
-  THUD_MEDIUM: 90,
+  THUD_MEDIUM: 85,
   HAPTIC_GAP: 0.06,
-  QUAKE_RUMBLE_GAP: 0.08,
   STRAIN_RUMBLE_GAP: 0.16, // at full strain; halfway strain taps half as often
 
   // --- effort face (only while pulling is genuinely hard, i.e. early game) ---
