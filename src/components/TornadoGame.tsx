@@ -10,8 +10,9 @@
  */
 import React, { useCallback, useMemo, useState } from 'react';
 import { StyleSheet, Text, View, Pressable } from 'react-native';
-import { Canvas, Rect, LinearGradient, Path, PathOp, Skia, vec } from '@shopify/react-native-skia';
+import { Canvas, Group, Rect, LinearGradient, Path, PathOp, Skia, vec } from '@shopify/react-native-skia';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import * as Haptics from 'expo-haptics';
 import {
   useDerivedValue,
   useFrameCallback,
@@ -36,7 +37,7 @@ interface Hud {
   running: boolean;
 }
 
-const PROP_W = [34, 58, 52, 32, 0, 44, 84]; // tree, trailer, house, silo, fence, cow, barn. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
+const PROP_W = [34, 58, 52, 32, 0, 44, 84, 64]; // tree, trailer, house, silo, fence, cow, barn, truck. The fence entry is UNUSED — propShadows reads that instance's own sw[i], since the corral's size is derived in state.ts. The cow entry is its HOOF-print, not its full nose-to-tail width, and is offset in propShadows.
 
 // Rolling hills on the horizon: [baseY, amplitude, k1, k2, parallax], far to
 // near. baseY/amplitude are SCREEN px (these are backdrop, not world props, so
@@ -49,6 +50,40 @@ const HILLS: readonly (readonly [number, number, number, number, number])[] = [
   [243, 21, 0.0132, 0.0068, 0.14],
   [272, 14, 0.0210, 0.0104, 0.22],
 ];
+
+// The pickup truck, in local art units: 62 long (lx -31..31, nose to the
+// RIGHT), wheels on the ground at lh 0, cab roof at lh 34. One function draws
+// it for both the parked billboard and the tumbling mid-air version, so the
+// two can't drift apart. The pose is the same one uprootPose uses: (cx, cy)
+// is where local (0, mid) lands, (ca, sa) the rotation, u px per art unit.
+// layer 0 = blue body, 1 = cab glass, 2 = tires, 3 = hubcaps + headlight.
+type PathBuilder = ReturnType<typeof Skia.PathBuilder.Make>;
+const drawTruck = (
+  path: PathBuilder, layer: number,
+  cx: number, cy: number, ca: number, sa: number, u: number, mid: number,
+) => {
+  'worklet';
+  const X = (lx: number, lh: number) => cx + ca * lx * u + sa * (lh - mid) * u;
+  const Y = (lx: number, lh: number) => cy + sa * lx * u - ca * (lh - mid) * u;
+  const poly = (pts: number[]) => {
+    path.moveTo(X(pts[0], pts[1]), Y(pts[0], pts[1]));
+    for (let k = 2; k < pts.length; k += 2) path.lineTo(X(pts[k], pts[k + 1]), Y(pts[k], pts[k + 1]));
+    path.close();
+  };
+  if (layer === 0) {
+    // bed (rear, left) + cab with a raked windshield + hood (front, right)
+    poly([-31, 6, 31, 6, 31, 16, 28, 20.5, 18, 22, 12, 34, -3, 34, -3, 20, -31, 20]);
+  } else if (layer === 1) {
+    poly([-0.5, 22.5, 15.3, 23.2, 11.1, 31.5, -0.5, 31.5]);
+  } else if (layer === 2) {
+    path.addCircle(X(-18, 6.5), Y(-18, 6.5), 6.5 * u);
+    path.addCircle(X(18, 6.5), Y(18, 6.5), 6.5 * u);
+  } else {
+    path.addCircle(X(-18, 6.5), Y(-18, 6.5), 2.6 * u);
+    path.addCircle(X(18, 6.5), Y(18, 6.5), 2.6 * u);
+    poly([27.5, 13.5, 31, 13.5, 31, 17, 27.5, 17]);
+  }
+};
 
 // Deterministic pseudo-random in [0,1) from a numeric seed — scatters dust/grit
 // particles and wind streaks without needing a dedicated RNG shared value.
@@ -111,6 +146,26 @@ export default function TornadoGame({ width, height }: Props) {
     [],
   );
 
+  // ---- haptics ----
+  // The sim only raises flags (world.thud on an uproot, world.quake, strain,
+  // maxEF); the frame callback below decides when to tap, rate-limited by
+  // hapticCd, and hops to JS for the actual call. Errors are swallowed: the
+  // simulator and devices without a Taptic Engine just do nothing.
+  const hapticCd = useSharedValue(0);
+  const lastEF = useSharedValue(-1);
+  const pendingEF = useSharedValue(0);
+  const buzz = useCallback((k: number) => {
+    const style =
+      k === 0 ? Haptics.ImpactFeedbackStyle.Soft
+      : k === 1 ? Haptics.ImpactFeedbackStyle.Light
+      : k === 2 ? Haptics.ImpactFeedbackStyle.Medium
+      : Haptics.ImpactFeedbackStyle.Heavy;
+    Haptics.impactAsync(style).catch(() => {});
+  }, []);
+  const buzzEF = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  }, []);
+
   // ---- the loop ----
   useFrameCallback((info) => {
     'worklet';
@@ -144,6 +199,32 @@ export default function TornadoGame({ width, height }: Props) {
     agitation.value += (want - agitation.value) * Math.min(1, dt * 7);
     ripPhase.value = (ripPhase.value + dt * 40) % 6.28318; // ~6 Hz sway
 
+    // haptics, in priority order: an uproot thud (held in world.thud until it
+    // fires, so a cooldown can delay it but never drop it), then a new EF
+    // rating, then the big-structure quake rumble, then the strain tug.
+    const ef = world.maxEF.value;
+    if (ef > lastEF.value) pendingEF.value = 1;
+    lastEF.value = ef; // also follows a restart back down to -1
+    hapticCd.value -= dt;
+    if (hapticCd.value <= 0) {
+      const thud = world.thud.value;
+      if (thud > 0) {
+        world.thud.value = 0;
+        runOnJS(buzz)(thud);
+        hapticCd.value = TUNING.HAPTIC_GAP;
+      } else if (pendingEF.value === 1) {
+        pendingEF.value = 0;
+        runOnJS(buzzEF)();
+        hapticCd.value = 0.15;
+      } else if (world.quake.value > 0) {
+        runOnJS(buzz)(world.quake.value > TUNING.QUAKE_SECS * 0.5 ? 3 : 2);
+        hapticCd.value = TUNING.QUAKE_RUMBLE_GAP;
+      } else if (world.strain.value > 0.3) {
+        runOnJS(buzz)(0);
+        hapticCd.value = TUNING.STRAIN_RUMBLE_GAP / world.strain.value;
+      }
+    }
+
     hudAccum.value += dt;
     if (hudAccum.value >= 0.14) {
       hudAccum.value = 0;
@@ -159,11 +240,14 @@ export default function TornadoGame({ width, height }: Props) {
 
   const FENCE_TYPE = STRUCTURE_ORDER.indexOf('fence'); // used by uprootedFences below and the fencePosts layer further down
   const COW_TYPE = STRUCTURE_ORDER.indexOf('cow'); // used by uprootedCows below and the cow branch in useStructurePath
-  // The farmstead pair. Both are SCENERY (state.ts spawns them with a
-  // breakWind above VMAX_CAP), so they only ever render ROOTED — neither has
-  // a mid-air uproot shape, and neither needs one until that override goes.
+  // The farmstead pair. Both are destructible (barn EF2, silo EF3); each has
+  // its own mid-air shape below (uprootedBarns / uprootedSilos) and its own
+  // debris color (useChunkPath).
   const SILO_TYPE = STRUCTURE_ORDER.indexOf('silo');
   const BARN_TYPE = STRUCTURE_ORDER.indexOf('barn');
+  // The pickup parked beside the barn (EF1). Drawn by drawTruck (module level)
+  // for both the parked and the mid-air version; debris flies as blue panels.
+  const TRUCK_TYPE = STRUCTURE_ORDER.indexOf('truck');
   const H = height;
   const cxScreen = width / 2;
   const K = TUNING.TILT_K;
@@ -317,28 +401,53 @@ export default function TornadoGame({ width, height }: Props) {
 
   // ---- debris & uprooted trees (coil UP the funnel, using the SAME helix the
   // funnel strands are drawn with, so they read as part of the wind) ----
-  const debrisChunks = useDerivedValue(() => {
-    world.tick.value;
-    const path = Skia.PathBuilder.Make();
-    const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
-    const alive = world.dalive.value, kind = world.dkind.value;
-    const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
-    const dsz = world.dsize.value;
-    for (let i = 0; i < alive.length; i++) {
-      if (alive[i] === 0 || kind[i] !== 0) continue;
-      const h = dh[i] < 0 ? 0 : dh[i] > 1 ? 1 : dh[i];
-      // ride the SAME cone the body is drawn from, so debris hugs the funnel's
-      // actual surface instead of an old straight-cone approximation
-      const [ccx, ccy, crr] = coneAt(h, bx, pb, baseY, swayX, vscale, s);
-      const rr = crr * rf[i];
-      const ry = rr * flat;
-      const rot = ph[i] + h * TUNING.FUNNEL_TWIST + s * TUNING.DEBRIS_COIL_SPEED;
-      const cx = ccx + Math.cos(rot) * rr;
-      const cy = ccy + Math.sin(rot) * ry;
-      path.addCircle(cx, cy, dsz[i] * pb * (0.6 + 0.4 * (1 - h)));
-    }
-    return path.detach();
-  });
+  // Chunks remember their origin type (simulation.ts copies dtype onto them at
+  // the burst), so barn debris flies as red planks and silo debris as cream
+  // shards instead of the generic brown. `only` = -1 draws every chunk that
+  // ISN'T from the farmstead; otherwise just chunks of that one type.
+  const useChunkPath = (only: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const { bx, pb, baseY, swayX, vscale, s, flat } = funnelFrame();
+      const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
+      const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
+      const dsz = world.dsize.value, spin = world.dspin.value;
+      for (let i = 0; i < alive.length; i++) {
+        if (alive[i] === 0 || kind[i] !== 0) continue;
+        const t = dtype[i];
+        const farm = t === BARN_TYPE || t === SILO_TYPE || t === TRUCK_TYPE;
+        if (only < 0 ? farm : t !== only) continue;
+        const h = dh[i] < 0 ? 0 : dh[i] > 1 ? 1 : dh[i];
+        // ride the SAME cone the body is drawn from, so debris hugs the funnel's
+        // actual surface instead of an old straight-cone approximation
+        const [ccx, ccy, crr] = coneAt(h, bx, pb, baseY, swayX, vscale, s);
+        const rr = crr * rf[i];
+        const ry = rr * flat;
+        const rot = ph[i] + h * TUNING.FUNNEL_TWIST + s * TUNING.DEBRIS_COIL_SPEED;
+        const cx = ccx + Math.cos(rot) * rr;
+        const cy = ccy + Math.sin(rot) * ry;
+        const r = dsz[i] * pb * (0.6 + 0.4 * (1 - h));
+        if (only < 0) {
+          path.addCircle(cx, cy, r);
+        } else {
+          // a tumbling plank/shard: a thin quad rotated by the chunk's self-spin
+          const ca = Math.cos(spin[i]), sa = Math.sin(spin[i]);
+          const len = r * 1.7, half = r * (only === BARN_TYPE ? 0.45 : only === TRUCK_TYPE ? 0.6 : 0.7);
+          path.moveTo(cx - ca * len - sa * half, cy - sa * len + ca * half);
+          path.lineTo(cx + ca * len - sa * half, cy + sa * len + ca * half);
+          path.lineTo(cx + ca * len + sa * half, cy + sa * len - ca * half);
+          path.lineTo(cx - ca * len + sa * half, cy - sa * len - ca * half);
+          path.close();
+        }
+      }
+      return path.detach();
+    });
+
+  const debrisChunks = useChunkPath(-1);
+  const barnChunks = useChunkPath(BARN_TYPE);
+  const siloChunks = useChunkPath(SILO_TYPE);
+  const truckChunks = useChunkPath(TRUCK_TYPE);
 
   // uprootedTrees: the DEFAULT whole-entity render — a trunk quad + canopy
   // blob, tumbling by its own self-spin. Used for every uprooted structure
@@ -354,7 +463,9 @@ export default function TornadoGame({ width, height }: Props) {
     const ph = world.dphase.value, rf = world.drf.value, dh = world.dh.value;
     const spin = world.dspin.value, dsz = world.dsize.value;
     for (let i = 0; i < alive.length; i++) {
-      if (alive[i] === 0 || kind[i] !== 1 || dtype[i] === FENCE_TYPE || dtype[i] === COW_TYPE) continue;
+      if (alive[i] === 0 || kind[i] !== 1) continue;
+      const dt0 = dtype[i];
+      if (dt0 === FENCE_TYPE || dt0 === COW_TYPE || dt0 === BARN_TYPE || dt0 === SILO_TYPE || dt0 === TRUCK_TYPE) continue;
       const h = dh[i] < 0 ? 0 : dh[i];
       const [ccx, ccy, crr] = coneAt(h, bx, pb, baseY, swayX, vscale, s);
       const rr = crr * rf[i];
@@ -483,6 +594,147 @@ export default function TornadoGame({ width, height }: Props) {
       path.addCircle(headX + ca * 0.2 * sc, headY + sa * 0.2 * sc, 0.12 * sc); // eye dot
     }
     return path.detach();
+  });
+
+  // ================= farmstead: mid-air shapes =================
+  // A ripped-up barn or silo tumbles through the funnel as a recognisable
+  // mini version of itself rather than the default tree icon. Each building
+  // is split into two layers (body, then slate roof) so it keeps its two-tone
+  // look, and both layers read the SAME pose from uprootPose so they can't
+  // drift apart. Local art units match the rooted billboards (barn 84 wide,
+  // walls to 38, peak 75; silo 32 wide, eave 66, dome to 81) and are scaled
+  // so the building's height is about 1.7x the entity's dsize.
+  const uprootPose = (
+    i: number,
+    f: { bx: number; pb: number; baseY: number; swayX: number; vscale: number; s: number; flat: number },
+  ) => {
+    'worklet';
+    const dh = world.dh.value[i];
+    const h = dh < 0 ? 0 : dh;
+    const [ccx, ccy, crr] = coneAt(h, f.bx, f.pb, f.baseY, f.swayX, f.vscale, f.s);
+    const rr = crr * world.drf.value[i];
+    const rot = world.dphase.value[i] + h * TUNING.FUNNEL_TWIST + f.s * TUNING.DEBRIS_COIL_SPEED;
+    const sp = world.dspin.value[i];
+    // [centerX, centerY, cos(spin), sin(spin), px per art unit]
+    return [
+      ccx + Math.cos(rot) * rr,
+      ccy + Math.sin(rot) * rr * f.flat,
+      Math.cos(sp),
+      Math.sin(sp),
+      (world.dsize.value[i] * f.pb) / 45,
+    ] as const;
+  };
+
+  // body = 0 draws the walls/cylinder, body = 1 the slate roof/dome
+  const useFarmUproot = (typeIndex: number, layer: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const f = funnelFrame();
+      const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
+      for (let i = 0; i < alive.length; i++) {
+        if (alive[i] === 0 || kind[i] !== 1 || dtype[i] !== typeIndex) continue;
+        const [cx, cy, ca, sa, u] = uprootPose(i, f);
+        // the building's "up" is (sa, -ca) so spin 0 stands it upright;
+        // its "right" is (ca, sa). Art is centred on its own mid-height.
+        const midH = typeIndex === BARN_TYPE ? 38 : 41;
+        const X = (lx: number, lh: number) => cx + ca * lx * u + sa * (lh - midH) * u;
+        const Y = (lx: number, lh: number) => cy + sa * lx * u - ca * (lh - midH) * u;
+        const poly = (pts: number[]) => {
+          path.moveTo(X(pts[0], pts[1]), Y(pts[0], pts[1]));
+          for (let k = 2; k < pts.length; k += 2) path.lineTo(X(pts[k], pts[k + 1]), Y(pts[k], pts[k + 1]));
+          path.close();
+        };
+        if (typeIndex === BARN_TYPE) {
+          if (layer === 0) {
+            poly([-42, 0, 42, 0, 42, 38, 32, 60, 0, 72, -32, 60, -42, 38]); // walls + gable
+          } else {
+            poly([-50, 35, -34, 60, 0, 75, 34, 60, 50, 35, 44, 31, 32, 54, 0, 68, -32, 54, -44, 31]); // gambrel band
+            poly([-12, 0, 12, 0, 12, 25, -12, 25]); // big door (slate reads as the open dark doorway mid-flight)
+          }
+        } else {
+          if (layer === 0) {
+            poly([-16, 0, 16, 0, 16, 66, -16, 66]); // cylinder
+          } else {
+            // dome as a 7-point fan over the eave, plus the finial
+            const pts: number[] = [];
+            for (let k = 0; k <= 6; k++) {
+              const a = Math.PI * (k / 6);
+              pts.push(-Math.cos(a) * 18.5, 66 + Math.sin(a) * 15);
+            }
+            poly(pts);
+          }
+        }
+      }
+      return path.detach();
+    });
+
+  const uprootedBarns = useFarmUproot(BARN_TYPE, 0);
+  const uprootedBarnRoofs = useFarmUproot(BARN_TYPE, 1);
+  const uprootedSilos = useFarmUproot(SILO_TYPE, 0);
+  const uprootedSiloDomes = useFarmUproot(SILO_TYPE, 1);
+
+  // the truck tumbling through the funnel, one path per drawTruck layer
+  const useTruckUproot = (layer: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const f = funnelFrame();
+      const alive = world.dalive.value, kind = world.dkind.value, dtype = world.dtype.value;
+      for (let i = 0; i < alive.length; i++) {
+        if (alive[i] === 0 || kind[i] !== 1 || dtype[i] !== TRUCK_TYPE) continue;
+        const [cx, cy, ca, sa, u] = uprootPose(i, f);
+        drawTruck(path, layer, cx, cy, ca, sa, u, 17);
+      }
+      return path.detach();
+    });
+  const uprootedTrucks = [useTruckUproot(0), useTruckUproot(1), useTruckUproot(2), useTruckUproot(3)];
+
+  // A parked truck the wind is working on rocks on its suspension: it tips
+  // up onto one pair of wheels and back, harder the more damaged it is, and
+  // pivots about the wheel still on the ground so it never sinks into it.
+  // Untouched (below its 100 mph threshold) it sits dead still, like every
+  // structure below its breakWind.
+  const truckGroundPose = (i: number, bx: number, by: number, sc: number, dmg: number) => {
+    'worklet';
+    const a = (1 - Math.max(dmg, 0)) * 0.16 * Math.sin(world.tick.value * 0.45 + i);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const pv = a > 0 ? 18 : -18;
+    return [bx + pv * sc * (1 - ca), by - sa * pv * sc, ca, sa] as const;
+  };
+
+  // parked truck detail layers (glass, tires, hubs); the body is layer 0 in
+  // useStructurePath's TRUCK_TYPE branch so it gets the generic body color
+  const useTruckGround = (layer: number) =>
+    useDerivedValue(() => {
+      world.tick.value;
+      const path = Skia.PathBuilder.Make();
+      const sx = world.sx.value, sy = world.sy.value;
+      const stype = world.stype.value, salive = world.salive.value;
+      const shp = world.shp.value, shpMax = world.shpMax.value;
+      for (let i = 0; i < salive.length; i++) {
+        if (salive[i] === 0 || stype[i] !== TRUCK_TYPE) continue;
+        const dmg = shpMax[i] > 0 ? shp[i] / shpMax[i] : 1;
+        const [bx, p] = project(sx[i], sy[i]);
+        const sc = p * (0.72 + 0.28 * Math.max(dmg, 0));
+        const [cx, cy, ca, sa] = truckGroundPose(i, bx, sy[i], sc, dmg);
+        drawTruck(path, layer, cx, cy, ca, sa, sc, 0);
+      }
+      return path.detach();
+    });
+  const truckGlass = useTruckGround(1);
+  const truckTires = useTruckGround(2);
+  const truckHubs = useTruckGround(3);
+
+  // Scene shake when a big structure is ripped up (world.quake counts down
+  // from QUAKE_SECS in simulation.ts). Decays linearly so it hits hard and
+  // settles; two incommensurate sines keep it from reading as a wobble.
+  const quakeTransform = useDerivedValue(() => {
+    const q = world.quake.value;
+    if (q <= 0) return [{ translateX: 0 }, { translateY: 0 }];
+    const a = (q / TUNING.QUAKE_SECS) * TUNING.QUAKE_PX;
+    const t = world.tick.value;
+    return [{ translateX: Math.sin(t * 2.1) * a }, { translateY: Math.cos(t * 2.9) * a * 0.6 }];
   });
 
   // ---- cute prop billboards ----
@@ -709,6 +961,9 @@ export default function TornadoGame({ width, height }: Props) {
           path.lineTo(bpx(32), bpy(60));
           path.lineTo(bpx(42), bpy(38));
           path.close();
+        } else if (typeIndex === TRUCK_TYPE) {
+          const [tcx, tcy, ca, sa] = truckGroundPose(i, bx, by, sc, dmg);
+          drawTruck(path, 0, tcx, tcy, ca, sa, sc, 0);
         }
       }
       return path.detach();
@@ -722,6 +977,7 @@ export default function TornadoGame({ width, height }: Props) {
     useStructurePath(4),
     useStructurePath(5),
     useStructurePath(6),
+    useStructurePath(7),
   ];
 
   // Pasture fence posts: a SEPARATE, darker layer drawn under the fence's
@@ -1523,6 +1779,7 @@ export default function TornadoGame({ width, height }: Props) {
     <View style={styles.root}>
       <GestureDetector gesture={pan}>
         <Canvas style={{ width, height }}>
+          <Group transform={quakeTransform}>
           <Rect x={0} y={0} width={width} height={height}>
             <LinearGradient
               start={vec(0, 0)}
@@ -1590,6 +1847,14 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={farmTrim} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
           <Path path={barnBrace} color="#c8503f" style="stroke" strokeWidth={2.2} strokeCap="round" />
 
+          {/* pickup truck: blue body (from the map above) re-stroked in ink,
+              then glass, tires, hubcaps + headlight */}
+          <Path path={structurePaths[TRUCK_TYPE]} color="#33291f" style="stroke" strokeWidth={1.3} strokeJoin="round" />
+          <Path path={truckGlass} color="#bfe3f0" />
+          <Path path={truckGlass} color="#33291f" style="stroke" strokeWidth={1.1} strokeJoin="round" />
+          <Path path={truckTires} color="#2b2320" />
+          <Path path={truckHubs} color="#e9eef2" />
+
           {/* storm cloud drawn OVER the props so far ones tuck behind the horizon */}
           <Path path={cloudBack} color="#1e2a35" />
           <Path path={cloudFront} color="#2a3947" />
@@ -1623,6 +1888,26 @@ export default function TornadoGame({ width, height }: Props) {
           <Path path={uprootedCows} color="#fdfbf7" />
           <Path path={uprootedCowMarkings} color="#2b2320" />
           <Path path={debrisChunks} color="#6f5c42" />
+          <Path path={barnChunks} color="#c8503f" />
+          <Path path={siloChunks} color="#e6e0d2" />
+          <Path path={siloChunks} color="#33291f" style="stroke" strokeWidth={0.8} strokeJoin="round" />
+
+          {/* ripped-up farmstead: body, ink outline, slate roof, ink outline */}
+          <Path path={uprootedSilos} color="#e6e0d2" />
+          <Path path={uprootedSilos} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
+          <Path path={uprootedSiloDomes} color="#5b6875" />
+          <Path path={uprootedBarns} color="#c8503f" />
+          <Path path={uprootedBarns} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
+          <Path path={uprootedBarnRoofs} color="#5b6875" />
+          <Path path={uprootedBarnRoofs} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
+          <Path path={truckChunks} color="#3f7fbf" />
+          <Path path={truckChunks} color="#33291f" style="stroke" strokeWidth={0.8} strokeJoin="round" />
+          <Path path={uprootedTrucks[0]} color="#3f7fbf" />
+          <Path path={uprootedTrucks[0]} color="#33291f" style="stroke" strokeWidth={1.2} strokeJoin="round" />
+          <Path path={uprootedTrucks[1]} color="#bfe3f0" />
+          <Path path={uprootedTrucks[2]} color="#2b2320" />
+          <Path path={uprootedTrucks[3]} color="#e9eef2" />
+          </Group>
         </Canvas>
       </GestureDetector>
 

@@ -48,8 +48,26 @@ Everything lives in `src/`:
 
 ## Progression loop
 
-Start at 70 mph → trees (65) fall → eat their debris → `Vmax` climbs → trailers
-(86) fall → houses (112) → grain silos (136). No XP bar, no unlock screen.
+Start at 70 mph → cows (35), fences (50) and trees (65) fall → eat their debris
+→ `Vmax` climbs → the farmstead pickup truck (100 mph, EF1) → the barn
+(120 mph, EF2) → the grain silo (136 mph, EF3). No XP bar, no unlock screen. Mobile homes (86) and houses (112) are
+defined in `model.ts` but not spawned yet.
+
+Big structures (breakWind ≥ `BIG_BREAK`) are a real wrestle: the strain face
+shows at any wind speed, ripping one up always pops the "big O" and shakes the
+scene, and each tumbles through the funnel as a mini version of itself before
+bursting into its own colored debris (red barn planks, cream silo shards).
+The truck isn't "big", but it rocks on its suspension while the wind works on
+it and tumbles as a whole pickup before bursting into blue panels.
+
+## Haptics
+
+`expo-haptics` (native module: adding it needs a rebuild). The sim only raises
+flags (`world.thud` on each uproot, `quake`, `strain`, `maxEF`) and the frame
+callback turns them into taps, rate-limited by `HAPTIC_GAP`: a light tap per
+small uproot, a medium knock for the truck, a heavy hit plus a rumble of taps
+while the scene quakes for the barn/silo, a soft tug that speeds up with the
+strain face, and a success buzz on each new EF rating.
 
 ## Known weak spot (build this next)
 

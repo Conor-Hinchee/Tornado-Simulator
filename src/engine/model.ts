@@ -50,12 +50,11 @@ export const STRUCTURES: Record<string, StructureType> = {
     w: 82, h: 66, chunks: 12, chunkMass: 1.3, color: '#ff8f5e',
   },
   silo: {
-    // Grain silo. Currently spawned as SCENERY next to a pasture (see the
-    // FARMSTEAD block in state.ts's resetWorld): the spawn overrides sbreak
-    // with a threshold above VMAX_CAP so the funnel can never touch it, but
-    // the real numbers below are left intact and correct — flipping the silo
-    // on later is deleting that one override line (plus giving it its own
-    // mid-air uproot shape, see [[structures_and_fence]]'s checklist).
+    // Grain silo, standing beside the barn at the farmstead (see the FARMSTEAD
+    // block in state.ts's resetWorld). The toughest thing on the field: it
+    // takes 136 mph to touch it, and flattening it certifies EF3. Uprooted it
+    // tumbles through the funnel as a cream cylinder with its slate dome (see
+    // uprootedSilos in TornadoGame.tsx), then bursts into cream chunks.
     // w/h is a nominal footprint; the drawn silo is 32 wide x 66 tall to the
     // eave (81 with its dome) in world units, see useStructurePath.
     key: 'silo', label: 'Grain silo', breakWind: 136, ef: 3, hp: 250,
@@ -91,22 +90,29 @@ export const STRUCTURES: Record<string, StructureType> = {
     w: 40, h: 30, chunks: 3, chunkMass: 0.2, color: '#fdfbf7',
   },
   barn: {
-    // The farmstead barn — a gambrel-roofed red barn that stands beside the
-    // grain silo just outside one of the pastures. Like the silo it is
-    // SCENERY for now: the FARMSTEAD block in state.ts overrides sbreak with
-    // a threshold above VMAX_CAP, so it never takes damage, never uproots and
-    // never certifies a rating, no matter how strong the run gets. The
-    // numbers below are the ones it should have when it goes live (EF2, a
-    // notch under a house: a barn is a big timber shell, not a slab-built
-    // home), so switching it on is deleting the override.
+    // The farmstead barn: a gambrel-roofed red barn beside the grain silo,
+    // just outside one of the pastures. EF2, a notch under a house (a barn is
+    // a big timber shell, not a slab-built home). Uprooted it tumbles through
+    // the funnel as a little red barn with its slate roof (uprootedBarns in
+    // TornadoGame.tsx), then bursts into red planks.
     // w/h is a nominal footprint; the drawn barn is 84 wide x 75 tall to the
     // roof peak (90 with its cupola) in world units, see useStructurePath.
     key: 'barn', label: 'Barn', breakWind: 120, ef: 2, hp: 200,
     w: 84, h: 75, chunks: 10, chunkMass: 1.1, color: '#c8503f',
   },
+  truck: {
+    // A blue farm pickup parked beside the barn. The only EF1 structure on
+    // the field (trailers are still parked), so it bridges the gap between
+    // the EF0 grove/pastures and the EF2 barn: 100 mph rolls it, flattening
+    // it certifies EF1. Uprooted it tumbles as a whole truck (uprootedTrucks
+    // in TornadoGame.tsx), then bursts into blue panels.
+    // Art is 62 wide x 34 tall in world units, facing right, see drawTruck.
+    key: 'truck', label: 'Pickup truck', breakWind: 100, ef: 1, hp: 110,
+    w: 62, h: 34, chunks: 7, chunkMass: 0.9, color: '#3f7fbf',
+  },
 };
 
-export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow', 'barn'] as const;
+export const STRUCTURE_ORDER = ['tree', 'trailer', 'house', 'silo', 'fence', 'cow', 'barn', 'truck'] as const;
 export type StructureKey = (typeof STRUCTURE_ORDER)[number];
 
 export const EF_LABELS = ['EF0', 'EF1', 'EF2', 'EF3', 'EF4', 'EF5'];
@@ -169,7 +175,7 @@ export const TUNING = {
 
   // --- lift capacity ---
   // How many WHOLE structures of EACH TYPE the funnel can carry at once.
-  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn);
+  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn, truck);
   // 0 means that type is NOT capped.
   //
   // Why per-type and not one shared pool: a shared pool was the first cut,
@@ -190,13 +196,12 @@ export const TUNING = {
   //
   // Uncapped types are still bounded by MAX_DEBRIS; that path now holds at
   // the brink too rather than silently destroying the structure.
-  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0, 2],
+  LIFT_CAP_BY_TYPE: [4, 3, 2, 2, 0, 0, 2, 0],
 
   // Extra simultaneous lifts granted per EF level, added to a capped type's
-  // base above. NOTE: every structure in the field today is `ef: 0` (tree,
-  // fence, cow), so maxEF never climbs past 0 and this currently contributes
-  // NOTHING — the caps resolve to their base values. It only starts mattering
-  // when EF1+ props (mobile homes) come back into `plan`, see state.ts.
+  // base above. Now live: flattening the barn (EF2) or silo (EF3) raises
+  // maxEF, so the tree cap grows from 4 to 8 or 10 and the late game clears
+  // the grove faster.
   LIFT_CAP_EF_STEP: 2,
 
   // --- tree sway ---
@@ -279,16 +284,47 @@ export const TUNING = {
   DEBRIS_SPIN_BASE: 3.3, // rad/s base angular speed around the funnel axis
   DEBRIS_SPIN_VK: 0.07, // extra rad/s per mph of Vmax (a stronger storm whips faster)
   DEBRIS_COIL_SPEED: 2.5, // couples debris coil to the funnel strands' own rotation
-  UPROOT_TIME: 0.8, // seconds a tree spins around whole before it shatters
+  UPROOT_TIME: 0.8, // LEGACY: simulation now reads UPROOT_TIME_BY_TYPE. Seconds a tree spins around whole before it shatters
   UPROOT_INWARD: 3.8, // how fast an uprooted tree spirals in onto the funnel
   UPROOT_RISE: 2.9, // how fast an uprooted tree climbs while still whole
   TREE_RISE_H: 0.42, // height (0..1) an uprooted tree reaches before bursting
-  TREE_TUMBLE: 7.0, // self-rotation speed (rad/s) of a tumbling whole tree
-  TREE_SIZE: 22, // render size (px) of a whole uprooted tree
+  TREE_TUMBLE: 7.0, // LEGACY (see UPROOT_TUMBLE_BY_TYPE) — self-rotation speed (rad/s) of a tumbling whole tree
+  TREE_SIZE: 22, // LEGACY (see UPROOT_SIZE_BY_TYPE) — render size (px) of a whole uprooted tree
   CHUNK_RISE_MIN: 0.26, // chunk ascent rate (h per second) range after a burst
   CHUNK_RISE_MAX: 0.6,
   CHUNK_SETTLE: 4.0, // how fast a chunk eases onto its funnel-hugging radius
   CHUNK_TUMBLE: 10.0, // chunk self-rotation speed (rad/s)
+
+  // --- per-type uproot feel ---
+  // Indexed by STRUCTURE_ORDER (tree, trailer, house, silo, fence, cow, barn),
+  // same as LIFT_CAP_BY_TYPE. A barn lifting off should NOT read like a tree:
+  // it's drawn bigger, tumbles slower (it's heavy), and hangs in the funnel
+  // whole for longer before it comes apart, which is the payoff moment.
+  UPROOT_SIZE_BY_TYPE: [22, 30, 34, 30, 22, 22, 38, 34], // render size (px) of the whole entity
+  UPROOT_TUMBLE_BY_TYPE: [7.0, 5.0, 4.0, 3.2, 7.0, 7.0, 2.6, 4.2], // self-rotation (rad/s)
+  UPROOT_TIME_BY_TYPE: [0.8, 1.0, 1.2, 1.5, 0.8, 0.8, 1.6, 1.2], // seconds aloft whole before the burst
+
+  // --- big-structure impact ---
+  // A structure whose breakWind is at or above this counts as BIG (barn,
+  // silo, house): wrestling one shows the strain face at ANY Vmax (normally it
+  // only shows below STRAIN_VMAX_MAX), and ripping one up always pops the
+  // "big O" and shakes the whole scene.
+  BIG_BREAK: 110,
+  QUAKE_SECS: 0.55, // how long the scene shakes when a big structure goes
+  QUAKE_PX: 9, // peak shake amplitude (screen px)
+
+  // --- haptics (see the frame callback in TornadoGame.tsx) ---
+  // Each uproot raises a "thud" weight by the structure's breakWind: below
+  // THUD_MEDIUM it's a light tap (cows, fences, trees), up to BIG_BREAK a
+  // medium knock (the truck), and big structures a heavy hit followed by a
+  // rumble of heavy taps for as long as the scene quakes. Wrestling a
+  // stubborn structure (the strain face) gives a soft rumble whose rate
+  // rises with the strain. HAPTIC_GAP is the minimum time between any two
+  // taps, so a grove vanishing at once doesn't turn into a buzz.
+  THUD_MEDIUM: 90,
+  HAPTIC_GAP: 0.06,
+  QUAKE_RUMBLE_GAP: 0.08,
+  STRAIN_RUMBLE_GAP: 0.16, // at full strain; halfway strain taps half as often
 
   // --- effort face (only while pulling is genuinely hard, i.e. early game) ---
   STRAIN_VMAX_MAX: 105, // above this Vmax trees pop easily -> no tugging face

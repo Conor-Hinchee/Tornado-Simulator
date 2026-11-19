@@ -103,7 +103,10 @@ export function stepWorld(w: WorldState, dt: number): void {
       // is ~1/4 of the way uprooted (25% damage), and only while a pull is
       // genuinely slow/hard (early game, low Vmax). Once Vmax is high, trees pop
       // instantly and we skip the tugging face entirely.
-      if (vmax < TUNING.STRAIN_VMAX_MAX && shp[i] <= 0.75 * shpMax[i]) {
+      // A BIG structure (barn, silo) is always a real wrestle, so it shows the
+      // effort face at any Vmax.
+      const big = sbreak[i] >= TUNING.BIG_BREAK;
+      if ((vmax < TUNING.STRAIN_VMAX_MAX || big) && shp[i] <= 0.75 * shpMax[i]) {
         strainTarget = 1;
         // one-time little shake on the very FIRST tree we ever wrestle this run
         if (w.introUsed.value === 0) {
@@ -145,10 +148,16 @@ export function stepWorld(w: WorldState, dt: number): void {
     if (sef[i] > w.maxEF.value) w.maxEF.value = sef[i];
     // "big O!" — always on a hard struggle pull, and now and then even while
     // freely eating trees, for a little spontaneous delight
-    if (vmax < TUNING.STRAIN_VMAX_MAX || Math.random() < TUNING.POP_FREE_CHANCE) {
+    // A big structure always gets the pop, plus a scene shake.
+    const bigPull = sbreak[i] >= TUNING.BIG_BREAK;
+    if (bigPull || vmax < TUNING.STRAIN_VMAX_MAX || Math.random() < TUNING.POP_FREE_CHANCE) {
       w.pop.value = 1;
-      w.popVariant.value = Math.random() < TUNING.POP_OPEN_CHANCE ? 1 : 0;
+      w.popVariant.value = bigPull || Math.random() < TUNING.POP_OPEN_CHANCE ? 1 : 0;
     }
+    if (bigPull) w.quake.value = TUNING.QUAKE_SECS;
+    // haptic weight for the frame callback to turn into a tap (it clears it)
+    const thud = bigPull ? 3 : sbreak[i] >= TUNING.THUD_MEDIUM ? 2 : 1;
+    if (thud > w.thud.value) w.thud.value = thud;
 
     let rf = r / (TUNING.FUNNEL_BASE_R * vscale);
     if (rf < 1) rf = 1; else if (rf > 5) rf = 5;
@@ -160,10 +169,10 @@ export function stepWorld(w: WorldState, dt: number): void {
     dh[slot] = 0;
     drise[slot] = schunks[i]; // reused on a whole tree: chunk count for the burst
     dspin[slot] = 0;
-    dspinv[slot] = TUNING.TREE_TUMBLE;
-    dsize[slot] = TUNING.TREE_SIZE;
+    dspinv[slot] = TUNING.UPROOT_TUMBLE_BY_TYPE[ti];
+    dsize[slot] = TUNING.UPROOT_SIZE_BY_TYPE[ti];
     dmass[slot] = schunkMass[i]; // reused on a whole tree: base chunk mass
-    dtimer[slot] = TUNING.UPROOT_TIME;
+    dtimer[slot] = TUNING.UPROOT_TIME_BY_TYPE[ti];
     dalive[slot] = 1;
   }
 
@@ -196,6 +205,9 @@ export function stepWorld(w: WorldState, dt: number): void {
           const j1 = (hsh % 100) / 100;
           const j2 = ((hsh * 3) % 100) / 100;
           dkind[slot] = 0;
+          // chunks keep their origin type so the render layer can paint barn
+          // debris red and silo debris cream (aloftByType ignores kind=0)
+          dtype[slot] = dtype[i];
           dphase[slot] = dphase[i] + (c / nCh) * 6.28318;
           drf[slot] = 0.75 + j1 * 0.6;
           dtargrf[slot] = 0.6 + j2 * 0.7; // 0.6..1.3 x funnel radius
@@ -233,6 +245,10 @@ export function stepWorld(w: WorldState, dt: number): void {
   w.strain.value += (strainTarget - w.strain.value) * Math.min(1, strainEase * dt);
   w.pop.value -= dt * TUNING.POP_FALL;
   if (w.pop.value < 0) w.pop.value = 0;
+  if (w.quake.value > 0) {
+    w.quake.value -= dt;
+    if (w.quake.value < 0) w.quake.value = 0;
+  }
   if (w.introShake.value > 0) {
     w.introShake.value -= dt;
     if (w.introShake.value < 0) w.introShake.value = 0;

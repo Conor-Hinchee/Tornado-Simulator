@@ -62,6 +62,8 @@ export interface WorldState {
   strain: SharedValue<number>; // 0..1 effort face while tugging a stubborn tree
   pop: SharedValue<number>; // 0..1 "big O" celebration pulse right after an uproot
   introShake: SharedValue<number>; // seconds left on the one-time first-tree face shake
+  quake: SharedValue<number>; // seconds left on the scene shake after a big structure is ripped up
+  thud: SharedValue<number>; // haptic weight of this frame's heaviest uproot: 0 none, 1 light, 2 medium, 3 big (read + cleared by the frame callback)
   introUsed: SharedValue<number>; // 1 once the intro shake has been triggered this run
   popVariant: SharedValue<number>; // celebration mouth: 0 = grin, 1 = open mouth (chosen per pop)
 
@@ -85,7 +87,7 @@ function makeRng(seed: number) {
  */
 export function createWorld(width: number, height: number): WorldState {
   const N = TUNING.MAX_DEBRIS;
-  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) + 1 barn + 1 silo = 126, with headroom)
+  const S = 160; // max structures (100 trees + 2 corrals x (4 fence sides + 8 cows) + barn + silo + truck = 127, with headroom)
   const f32 = (n: number) => makeMutable<Float32Array>(new Float32Array(n));
 
   const w: WorldState = {
@@ -111,6 +113,8 @@ export function createWorld(width: number, height: number): WorldState {
     strain: makeMutable(0),
     pop: makeMutable(0),
     introShake: makeMutable(0),
+    quake: makeMutable(0),
+    thud: makeMutable(0),
     introUsed: makeMutable(0),
     popVariant: makeMutable(0),
 
@@ -166,11 +170,13 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   w.strain.value = 0;
   w.pop.value = 0;
   w.introShake.value = 0;
+  w.quake.value = 0;
+  w.thud.value = 0;
   w.introUsed.value = 0;
   w.popVariant.value = 0;
 
   // Field composition: a grove of trees + two pastures + one farmstead
-  // (barn + silo, scenery only for now). EF1+ still parked.
+  // (pickup truck EF1 + barn EF2 + silo EF3). Trailers and houses are still parked.
   const plan: string[] = [
     // EF0 phase: a grove of trees. Fences and cows are NOT listed here —
     // they're correlated groups (4 sides + a herd of 8 sharing one corral
@@ -338,26 +344,16 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   // corrals, so the pasture, the herd and the farm buildings read as one
   // place rather than three unrelated props dropped on a field.
   //
-  // SCENERY, deliberately. Both are spawned as ordinary structure slots —
-  // they get depth scaling, ground shadows and the damage-shrink factor for
-  // free that way, and switching them on later is a one-line change — but
-  // their `sbreak` is overridden to SCENERY_BREAK, which is above VMAX_CAP
-  // (210). simulation.ts skips a structure whose local wind never exceeds
-  // sbreak, so these two can never take damage, never uproot, and can never
-  // certify their EF rating. Their real breakWind/ef/hp live in STRUCTURES
-  // and are untouched, ready for the day they go live.
-  //
-  // WHEN THEY DO GO LIVE: they have no mid-air uproot shape yet, so a
-  // destroyed one would tumble through the funnel drawn as the generic tree
-  // icon. Give each a `dtype`-filtered uproot path (the way uprootedFences /
-  // uprootedCows do) at the same time as removing the override.
-  const SCENERY_BREAK = 9999;
+  // Both are live structures: the barn breaks at 120 mph (EF2) and the silo
+  // at 136 (EF3), so they're the late-game payoff for the Vmax you've built
+  // up eating the grove and the herds. Each has its own mid-air shape
+  // (uprootedBarns / uprootedSilos in TornadoGame.tsx).
   const bt = STRUCTURES.barn;
   const bti = STRUCTURE_ORDER.indexOf('barn');
   const st = STRUCTURES.silo;
   const sti = STRUCTURE_ORDER.indexOf('silo');
 
-  // The pair's shared footprint, measured from the BARN's ground x: the barn
+  // The farm row's shared footprint (the truck is added further down), measured from the BARN's ground x: the barn
   // is 84 wide (half 42) and the silo stands SILO_DX to its right, 32 wide
   // (half 16). So the pair spans -46 .. +86 about the barn, i.e. a box of
   // half-width 66 centred 20 to the barn's right. farmCx/farmCy below track
@@ -365,8 +361,14 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   // position is derived back off it at the end.
   const SILO_DX = 66; // silo centre, right of the barn's centre
   const SILO_DY = -10; // and slightly further back, so it renders behind the barn
-  const farmOff = 20; // box centre, right of the barn's ground x
-  const farmHalfW = 66;
+  // The pickup parks on the barn's LEFT, a little in front of it: its 62-wide
+  // art (lx -31..31) ends 8 units short of the barn's left roof eave (-50).
+  const TRUCK_DX = -89;
+  const TRUCK_DY = 16;
+  // With the truck the row spans -120 .. +86 about the barn: a box of
+  // half-width 103 centred 17 to the barn's LEFT.
+  const farmOff = -17; // box centre, right of the barn's ground x (negative = left)
+  const farmHalfW = 103;
   const farmHalfH = 40; // the pair are billboards; this is elbow room, not a real depth
   const farmGap = 40; // clearance between the corral's rail and the nearest farm edge
 
@@ -426,6 +428,7 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
   const farmProps: [typeof bt, number, number, number][] = [
     [st, sti, barnX + SILO_DX, barnY + SILO_DY], // silo first: it stands further
     [bt, bti, barnX, barnY],                     // back, and lower stype draws first
+    [STRUCTURES.truck, STRUCTURE_ORDER.indexOf('truck'), barnX + TRUCK_DX, barnY + TRUCK_DY],
   ];
   for (let k = 0; k < farmProps.length; k++) {
     const [t, ti, px, py] = farmProps[k];
@@ -433,7 +436,7 @@ export function resetWorld(w: WorldState, seed = Math.floor(Math.random() * 1e6)
     sy[slot] = py;
     shp[slot] = t.hp;
     shpMax[slot] = t.hp;
-    sbreak[slot] = SCENERY_BREAK; // <- the ONE line that makes these scenery
+    sbreak[slot] = t.breakWind;
     sef[slot] = t.ef;
     sw[slot] = t.w;
     sh[slot] = t.h;
